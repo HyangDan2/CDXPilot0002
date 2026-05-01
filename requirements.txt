@@ -1,0 +1,6 @@
+PySide6==6.7.3
+shiboken6==6.7.3
+finance-datareader>=0.9.90
+pandas>=2.0
+PyYAML>=6.0
+pykrx>=1.0

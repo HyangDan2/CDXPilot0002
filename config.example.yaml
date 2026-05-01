@@ -1,0 +1,10 @@
+llm:
+  base_url: "https://api.openai.com/v1"
+  api_key: "YOUR_API_KEY_HERE"
+  model: "gpt-4.1-mini"
+  temperature: 0.2
+  max_tokens: 12000
+  timeout_seconds: 90
+telegram:
+  bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
+  chat_id: "YOUR_TELEGRAM_CHAT_ID"
