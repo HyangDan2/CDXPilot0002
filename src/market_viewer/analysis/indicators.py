@@ -9,6 +9,7 @@ def add_indicators(frame: pd.DataFrame) -> pd.DataFrame:
     enriched["MA20"] = enriched["Close"].rolling(20).mean()
     enriched["MA60"] = enriched["Close"].rolling(60).mean()
     enriched["MA120"] = enriched["Close"].rolling(120).mean()
+    enriched["MA224"] = enriched["Close"].rolling(224).mean()
     enriched["VolumeMA20"] = enriched["Volume"].rolling(20).mean()
     enriched["VolumeRatio"] = enriched["Volume"] / enriched["VolumeMA20"].replace(0, pd.NA)
     for window in (5, 20, 60, 120):

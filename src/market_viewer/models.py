@@ -50,13 +50,6 @@ class TelegramConfig:
 
 
 @dataclass(slots=True)
-class FundamentalSnapshot:
-    as_of_date: str = ""
-    values: dict[str, float | int | str | None] = field(default_factory=dict)
-    notes: list[str] = field(default_factory=list)
-
-
-@dataclass(slots=True)
 class ReportRow:
     section: str
     label: str
@@ -93,5 +86,5 @@ class AppSessionState:
     chart_visible_start: str | None = None
     chart_visible_end: str | None = None
     chart_tab_index: int = 0
-    splitter_sizes: list[int] = field(default_factory=lambda: [360, 760, 460])
+    splitter_sizes: list[int] = field(default_factory=lambda: [680, 500])
     llm_config: LLMConfig = field(default_factory=LLMConfig)

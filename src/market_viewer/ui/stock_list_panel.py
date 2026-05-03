@@ -8,9 +8,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
-    QPlainTextEdit,
     QPushButton,
-    QTextBrowser,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -24,13 +22,11 @@ class StockListPanel(QWidget):
     market_scope_changed = Signal(str)
     refresh_requested = Signal()
     stock_activated = Signal(object)
-    interpret_requested = Signal(str)
-    apply_requested = Signal()
-    screen_cleared = Signal()
 
     def __init__(self) -> None:
         super().__init__()
         self._frame = pd.DataFrame()
+        self._filter_prompt = ""
         self._is_updating_table = False
         self._setup_ui()
 
@@ -58,42 +54,13 @@ class StockListPanel(QWidget):
         self.search_input.textChanged.connect(self._apply_view_filter)
         layout.addWidget(self.search_input)
 
-        filter_label = QLabel("자연어 스크리닝 조건")
-        filter_label.setObjectName("sectionLabel")
-        layout.addWidget(filter_label)
-        filter_row = QHBoxLayout()
-        self.filter_input = QPlainTextEdit()
-        self.filter_input.setPlaceholderText(
-            "예시 프롬프트\n"
-            "- 요즘 흐름이 살아 있고 거래가 붙으면서 전고점 근처를 다시 두드리는 코스닥 종목\n"
-            "- 일본 시장에서 최근 눌림 뒤 다시 올라오려는 강한 종목\n"
-            "- 너무 과열되진 않았지만 추세가 꾸준하고 거래량이 받쳐주는 한국 종목"
-        )
-        self.filter_input.setMinimumHeight(96)
-        self.filter_input.setMaximumHeight(112)
-        self.interpret_button = QPushButton("해석")
-        self.interpret_button.clicked.connect(self._emit_interpret_requested)
-        self.apply_button = QPushButton("적용")
-        self.apply_button.clicked.connect(self.apply_requested.emit)
-        self.apply_button.setEnabled(False)
-        self.clear_screen_button = QPushButton("초기화")
-        self.clear_screen_button.clicked.connect(self.screen_cleared.emit)
-        filter_buttons = QVBoxLayout()
-        filter_buttons.addWidget(self.interpret_button)
-        filter_buttons.addWidget(self.apply_button)
-        filter_buttons.addWidget(self.clear_screen_button)
-        filter_buttons.addStretch(1)
-        filter_row.addWidget(self.filter_input)
-        filter_row.addLayout(filter_buttons)
-        layout.addLayout(filter_row)
-
-        resolved_title = QLabel("해석된 조건")
+        resolved_title = QLabel("적용 조건")
         resolved_title.setObjectName("sectionLabel")
         layout.addWidget(resolved_title)
-        self.resolved_browser = QTextBrowser()
-        self.resolved_browser.setMinimumHeight(84)
-        self.resolved_browser.setMaximumHeight(96)
-        layout.addWidget(self.resolved_browser)
+        self.screen_summary_label = QLabel("조건 없음")
+        self.screen_summary_label.setObjectName("mutedLabel")
+        self.screen_summary_label.setWordWrap(True)
+        layout.addWidget(self.screen_summary_label)
 
         summary_row = QHBoxLayout()
         self.count_label = QLabel("0 종목")
@@ -142,19 +109,20 @@ class StockListPanel(QWidget):
         self._apply_view_filter(auto_activate=auto_activate)
 
     def set_filter_prompt(self, prompt: str) -> None:
-        self.filter_input.setPlainText(prompt)
+        self._filter_prompt = prompt.strip()
 
     def set_resolved_preview(self, markdown: str) -> None:
-        self.resolved_browser.document().setMarkdown(markdown)
+        text = markdown.replace("#", "").replace("*", "").strip()
+        self.screen_summary_label.setText(text or "조건 없음")
 
     def set_apply_enabled(self, enabled: bool) -> None:
-        self.apply_button.setEnabled(enabled)
+        return
 
     def filter_prompt(self) -> str:
-        return self.filter_input.toPlainText().strip()
+        return self._filter_prompt
 
     def focus_filter_prompt(self) -> None:
-        self.filter_input.setFocus()
+        self.table.setFocus()
 
     def focus_search(self) -> None:
         self.search_input.setFocus()
@@ -166,13 +134,13 @@ class StockListPanel(QWidget):
         self.table.setFocus()
 
     def trigger_interpret(self) -> None:
-        self._emit_interpret_requested()
+        return
 
     def trigger_apply(self) -> None:
-        self.apply_requested.emit()
+        return
 
     def trigger_clear(self) -> None:
-        self.screen_cleared.emit()
+        return
 
     def current_stock(self) -> StockReference | None:
         row = self.table.currentRow()
@@ -250,9 +218,6 @@ class StockListPanel(QWidget):
 
     def _emit_market_scope_changed(self) -> None:
         self.market_scope_changed.emit(self.current_market_scope())
-
-    def _emit_interpret_requested(self) -> None:
-        self.interpret_requested.emit(self.filter_prompt())
 
     def _emit_selected_stock(self, row: int, _: int) -> None:
         item = self.table.item(row, 0)

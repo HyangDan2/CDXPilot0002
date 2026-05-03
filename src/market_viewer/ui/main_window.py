@@ -13,10 +13,9 @@ from market_viewer.config.app_config_store import (
     save_app_configs,
 )
 from market_viewer.config.session_store import load_session, save_session
-from market_viewer.data.fundamental_service import FundamentalService
 from market_viewer.data.market_registry import list_market_scopes
 from market_viewer.data.market_service import MarketService
-from market_viewer.models import AppSessionState, FundamentalSnapshot, StockReference
+from market_viewer.models import AppSessionState, StockReference
 from market_viewer.prompt_layers.layer_registry import get_prompt_layer, list_prompt_layers
 from market_viewer.services.context_service import build_workspace_context_markdown
 from market_viewer.services.intelligence_service import build_report_rows
@@ -25,13 +24,13 @@ from market_viewer.services.request_gate import RequestGate
 from market_viewer.services.screening_service import (
     build_resolved_filter_markdown,
     execute_screening,
-    interpret_screening_prompt,
     parse_local_screening_prompt,
 )
 from market_viewer.telegram.client import send_telegram_report
 from market_viewer.ui.analysis_panel import AnalysisPanel
-from market_viewer.ui.chart_panel import ChartPanel
+from market_viewer.ui.chart_window import ChartWindow
 from market_viewer.ui.llm_settings_dialog import LLMSettingsDialog
+from market_viewer.ui.screening_dialog import ScreeningDialog
 from market_viewer.ui.stock_list_panel import StockListPanel
 from market_viewer.ui.telegram_settings_dialog import TelegramSettingsDialog
 from market_viewer.ui.worker import Worker, WorkerTask
@@ -39,7 +38,6 @@ from market_viewer.ui.worker import Worker, WorkerTask
 
 class MainWindow(QMainWindow):
     CHANNEL_LISTING = "listing"
-    CHANNEL_INTERPRET = "interpret"
     CHANNEL_SCREEN = "screen"
     CHANNEL_PRICE = "price"
     CHANNEL_LLM_TEST = "llm_test"
@@ -49,7 +47,6 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.market_service = MarketService()
-        self.fundamental_service = FundamentalService()
         self.thread_pool = QThreadPool.globalInstance()
         self.session_state = AppSessionState()
         self.session_state.llm_config = load_llm_config()
@@ -57,18 +54,16 @@ class MainWindow(QMainWindow):
         self.current_listing = pd.DataFrame()
         self.current_stock: StockReference | None = None
         self.current_price_frame: pd.DataFrame | None = None
-        self.current_fundamental_snapshot = FundamentalSnapshot()
         self.current_filter = ParsedFilter(original_prompt="", normalized_prompt="")
         self.session_path: str | None = None
         self._pending_restore: AppSessionState | None = None
         self._restore_screen_pending = False
         self._prompt_layer_actions: dict[str, QAction] = {}
-        self._apply_after_interpret = False
         self._request_gate = RequestGate()
         self._is_closing = False
 
         self.setWindowTitle("Multi-Market Screener")
-        self.resize(1720, 980)
+        self.resize(1180, 840)
         self._setup_ui()
         self._create_actions()
         self._create_menus()
@@ -81,17 +76,15 @@ class MainWindow(QMainWindow):
         self.stock_panel.set_market_options(list_market_scopes())
         self.stock_panel.set_market_scope(self.session_state.market_scope)
 
-        self.chart_panel = ChartPanel()
+        self.chart_window = ChartWindow(self)
         self.analysis_panel = AnalysisPanel()
 
         self.splitter = QSplitter()
         self.splitter.setChildrenCollapsible(False)
         self.splitter.addWidget(self.stock_panel)
-        self.splitter.addWidget(self.chart_panel)
         self.splitter.addWidget(self.analysis_panel)
-        self.splitter.setStretchFactor(0, 3)
-        self.splitter.setStretchFactor(1, 6)
-        self.splitter.setStretchFactor(2, 4)
+        self.splitter.setStretchFactor(0, 5)
+        self.splitter.setStretchFactor(1, 4)
         self.splitter.setSizes(self.session_state.splitter_sizes)
         self.setCentralWidget(self.splitter)
 
@@ -101,9 +94,6 @@ class MainWindow(QMainWindow):
         self.stock_panel.market_scope_changed.connect(self._on_market_scope_changed)
         self.stock_panel.refresh_requested.connect(self._refresh_current_scope)
         self.stock_panel.stock_activated.connect(self._load_price_history)
-        self.stock_panel.interpret_requested.connect(self._interpret_screen_prompt)
-        self.stock_panel.apply_requested.connect(self._apply_resolved_screen)
-        self.stock_panel.screen_cleared.connect(self._clear_screen)
 
         self.analysis_panel.analyze_requested.connect(self._run_llm_analysis)
         self.analysis_panel.clear_requested.connect(lambda: self.analysis_panel.set_result_markdown(""))
@@ -129,8 +119,8 @@ class MainWindow(QMainWindow):
         )
 
         self.focus_filter_action = self._make_action(
-            "스크리너 입력 포커스",
-            self.stock_panel.focus_filter_prompt,
+            "스크리너 조건 설정",
+            self._open_screening_dialog,
             shortcut="Ctrl+F",
             register_shortcut=True,
         )
@@ -153,8 +143,8 @@ class MainWindow(QMainWindow):
             register_shortcut=True,
         )
         self.focus_chart_action = self._make_action(
-            "차트 포커스",
-            self.chart_panel.setFocus,
+            "차트 창 열기",
+            self._reveal_chart_window,
             shortcut="Ctrl+2",
             register_shortcut=True,
         )
@@ -165,21 +155,21 @@ class MainWindow(QMainWindow):
             register_shortcut=True,
         )
 
-        self.interpret_screen_action = self._make_action(
-            "조건 해석",
-            self.stock_panel.trigger_interpret,
+        self.screen_settings_action = self._make_action(
+            "조건 설정",
+            self._open_screening_dialog,
             shortcut="Ctrl+Return",
             register_shortcut=True,
         )
         self.apply_screen_action = self._make_action(
             "조건 적용",
-            self.stock_panel.trigger_apply,
+            self._apply_resolved_screen,
             shortcut="Ctrl+Shift+Return",
             register_shortcut=True,
         )
         self.clear_screen_action = self._make_action(
             "스크리너 초기화",
-            self.stock_panel.trigger_clear,
+            self._clear_screen,
             shortcut="Escape",
             register_shortcut=True,
         )
@@ -208,31 +198,31 @@ class MainWindow(QMainWindow):
             self.preset_actions[preset] = action
         self.pan_left_action = self._make_action(
             "차트 왼쪽 이동",
-            lambda: self.chart_panel.pan_relative(-0.2),
+            lambda: self.chart_window.chart_panel.pan_relative(-0.2),
             shortcut="Alt+H",
             register_shortcut=True,
         )
         self.pan_right_action = self._make_action(
             "차트 오른쪽 이동",
-            lambda: self.chart_panel.pan_relative(0.2),
+            lambda: self.chart_window.chart_panel.pan_relative(0.2),
             shortcut="Alt+L",
             register_shortcut=True,
         )
         self.zoom_in_action = self._make_action(
             "차트 확대",
-            lambda: self.chart_panel.zoom_relative(0.8),
+            lambda: self.chart_window.chart_panel.zoom_relative(0.8),
             shortcut="Ctrl+=",
             register_shortcut=True,
         )
         self.zoom_out_action = self._make_action(
             "차트 축소",
-            lambda: self.chart_panel.zoom_relative(1.25),
+            lambda: self.chart_window.chart_panel.zoom_relative(1.25),
             shortcut="Ctrl+-",
             register_shortcut=True,
         )
         self.reset_chart_action = self._make_action(
             "차트 리셋",
-            self.chart_panel.reset_range,
+            self.chart_window.chart_panel.reset_range,
             shortcut="Ctrl+0",
             register_shortcut=True,
         )
@@ -278,21 +268,22 @@ class MainWindow(QMainWindow):
         screening_menu = menu_bar.addMenu("Screening")
         screening_menu.addAction(self.focus_market_action)
         screening_menu.addAction(self.focus_search_action)
-        screening_menu.addAction(self.focus_filter_action)
         screening_menu.addSeparator()
-        screening_menu.addAction(self.interpret_screen_action)
+        screening_menu.addAction(self.screen_settings_action)
         screening_menu.addAction(self.apply_screen_action)
         screening_menu.addAction(self.clear_screen_action)
 
-        view_menu = menu_bar.addMenu("View")
+        chart_menu = menu_bar.addMenu("Chart")
+        chart_menu.addAction(self.focus_chart_action)
+        chart_menu.addSeparator()
         for preset in ["3M", "6M", "1Y", "ALL"]:
-            view_menu.addAction(self.preset_actions[preset])
-        view_menu.addSeparator()
-        view_menu.addAction(self.pan_left_action)
-        view_menu.addAction(self.pan_right_action)
-        view_menu.addAction(self.zoom_in_action)
-        view_menu.addAction(self.zoom_out_action)
-        view_menu.addAction(self.reset_chart_action)
+            chart_menu.addAction(self.preset_actions[preset])
+        chart_menu.addSeparator()
+        chart_menu.addAction(self.pan_left_action)
+        chart_menu.addAction(self.pan_right_action)
+        chart_menu.addAction(self.zoom_in_action)
+        chart_menu.addAction(self.zoom_out_action)
+        chart_menu.addAction(self.reset_chart_action)
 
         llm_menu = menu_bar.addMenu("LLM")
         llm_menu.addAction(self.llm_settings_action)
@@ -401,7 +392,6 @@ class MainWindow(QMainWindow):
     def _clear_active_stock_context(self) -> None:
         self.current_stock = None
         self.current_price_frame = None
-        self.current_fundamental_snapshot = FundamentalSnapshot()
 
     def _restore_pending_selection_after_listing(self) -> None:
         if self._pending_restore is None:
@@ -409,7 +399,10 @@ class MainWindow(QMainWindow):
         state = self._pending_restore
         if state.filter_prompt and not self._restore_screen_pending:
             self._restore_screen_pending = True
-            self._interpret_screen_prompt(state.filter_prompt, apply_after=True)
+            self.stock_panel.set_filter_prompt(state.filter_prompt)
+            self.current_filter = parse_local_screening_prompt(state.filter_prompt, state.market_scope)
+            self.stock_panel.set_resolved_preview(build_resolved_filter_markdown(self.current_filter, state.market_scope))
+            self._apply_resolved_screen()
             return
         if state.selected_stock:
             self.stock_panel.select_stock(state.selected_stock)
@@ -420,8 +413,9 @@ class MainWindow(QMainWindow):
     def _finalize_restore_after_price_load(self) -> None:
         if self._pending_restore is None:
             return
-        self.chart_panel.set_tab_index(self._pending_restore.chart_tab_index)
-        self.chart_panel.set_visible_range_from_iso(
+        chart_panel = self.chart_window.chart_panel
+        chart_panel.set_tab_index(self._pending_restore.chart_tab_index)
+        chart_panel.set_visible_range_from_iso(
             self._pending_restore.chart_visible_start,
             self._pending_restore.chart_visible_end,
         )
@@ -446,7 +440,7 @@ class MainWindow(QMainWindow):
             channel=self.CHANNEL_LISTING,
             task_name="listing",
             status_message=f"{market_scope} 종목 목록을 불러오는 중입니다...",
-            fn=lambda: (market_scope, *self.fundamental_service.enrich_listing(self.market_service.load_listing(market_scope))),
+            fn=lambda: (market_scope, self.market_service.load_listing(market_scope), []),
             on_success=self._on_listing_loaded,
         )
 
@@ -465,7 +459,6 @@ class MainWindow(QMainWindow):
 
     def _clear_screen(self) -> None:
         self.current_filter = ParsedFilter(original_prompt="", normalized_prompt="")
-        self._apply_after_interpret = False
         self._clear_active_stock_context()
         self.stock_panel.set_filter_prompt("")
         self.stock_panel.set_resolved_preview("조건이 비어 있습니다. 현재 시장 범위 전체를 표시합니다.")
@@ -475,82 +468,27 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("스크리너 조건을 초기화하고 종목 목록을 다시 불러오는 중입니다...")
         self._load_listing(market_scope)
 
-    def _interpret_screen_prompt(self, prompt: str, apply_after: bool = False) -> None:
+    def _open_screening_dialog(self) -> None:
+        dialog = ScreeningDialog(self.stock_panel.filter_prompt(), self)
+        if not dialog.exec():
+            return
+        prompt = dialog.screening_prompt()
+        self.stock_panel.set_filter_prompt(prompt)
+        self._resolve_screen_prompt(prompt)
+        self._apply_resolved_screen()
+
+    def _resolve_screen_prompt(self, prompt: str) -> None:
         market_scope = self.stock_panel.current_market_scope()
         parsed = parse_local_screening_prompt(prompt, market_scope)
-        self._apply_after_interpret = apply_after
-        prompt_text = prompt.strip()
-        should_try_llm = bool(prompt_text) and self.session_state.llm_config.connection_ready
-
         self.current_filter = parsed
-        if should_try_llm:
-            self.stock_panel.set_resolved_preview(
-                """## 해석 결과
-
-- 해석 소스: LLM 자연어 해석 대기
-- 시장 범위: 자동 추론 중
-- 상태: 입력 문장을 구조화하고, 부족하면 자동 보정하는 중입니다.
-"""
-            )
-        else:
-            self.stock_panel.set_resolved_preview(build_resolved_filter_markdown(parsed, market_scope))
+        self.stock_panel.set_resolved_preview(build_resolved_filter_markdown(parsed, market_scope))
         self.stock_panel.set_apply_enabled(True)
-
-        if should_try_llm:
-            self._run_scoped_worker(
-                channel=self.CHANNEL_INTERPRET,
-                task_name="interpret_screen_llm",
-                status_message="자연어 조건을 LLM으로 해석하는 중입니다...",
-                fn=lambda: interpret_screening_prompt(
-                    prompt=prompt,
-                    market_scope=market_scope,
-                    llm_config=self.session_state.llm_config,
-                    local_fallback=parsed,
-                ),
-                on_success=self._on_screen_prompt_interpreted,
-                on_failure=lambda message, fallback=parsed, scope=market_scope: self._on_screen_prompt_interpret_failed(
-                    message,
-                    fallback,
-                    scope,
-                ),
-            )
-            return
-
-        self.statusBar().showMessage("조건 해석이 완료되었습니다. 적용 버튼으로 실행할 수 있습니다.", 4000)
-        if apply_after:
-            self._apply_resolved_screen()
-
-    def _on_screen_prompt_interpreted(self, task: WorkerTask) -> None:
-        parsed = task.payload
-        if isinstance(parsed, ParsedFilter) and (parsed.conditions or parsed.markets or parsed.warnings):
-            self.current_filter = parsed
-        self.stock_panel.set_resolved_preview(
-            build_resolved_filter_markdown(self.current_filter, self.stock_panel.current_market_scope())
-        )
-        self.stock_panel.set_apply_enabled(True)
-        self.statusBar().showMessage("자연어 조건 해석이 완료되었습니다. 적용 버튼으로 실행할 수 있습니다.", 4000)
-        if self._apply_after_interpret:
-            self._apply_resolved_screen()
-
-    def _on_screen_prompt_interpret_failed(
-        self,
-        message: str,
-        fallback: ParsedFilter,
-        market_scope: str,
-    ) -> None:
-        fallback.warnings.append(f"LLM 해석 실패, 로컬 보조 규칙으로 유지: {message}")
-        self.current_filter = fallback
-        self.stock_panel.set_resolved_preview(build_resolved_filter_markdown(fallback, market_scope))
-        self.stock_panel.set_apply_enabled(True)
-        self.statusBar().showMessage("LLM 해석이 충분하지 않아 로컬 보조 규칙을 함께 사용합니다.", 5000)
-        if self._apply_after_interpret:
-            self._apply_resolved_screen()
+        self.statusBar().showMessage("스크리너 조건을 갱신했습니다.", 4000)
 
     def _apply_resolved_screen(self) -> None:
         prompt = self.stock_panel.filter_prompt()
         if prompt != self.current_filter.original_prompt:
-            self._interpret_screen_prompt(prompt, apply_after=True)
-            return
+            self._resolve_screen_prompt(prompt)
 
         market_scope = self.stock_panel.current_market_scope()
         parsed = self.current_filter
@@ -558,12 +496,15 @@ class MainWindow(QMainWindow):
             channel=self.CHANNEL_SCREEN,
             task_name="screen",
             status_message="조건 스크리닝을 실행하는 중입니다...",
-                fn=lambda: (parsed, execute_screening(
+            fn=lambda: (
+                parsed,
+                execute_screening(
                     market_service=self.market_service,
                     market_scope=market_scope,
                     parsed_filter=parsed,
                     listing=self.current_listing,
-                )),
+                ),
+            ),
             on_success=self._on_screen_loaded,
         )
 
@@ -581,7 +522,6 @@ class MainWindow(QMainWindow):
         if warning_text:
             self.analysis_panel.set_result_markdown(f"## 스크리닝 경고\n\n- " + "\n- ".join(warnings))
         self._refresh_workspace_context()
-        self._apply_after_interpret = False
 
         if self._pending_restore is not None and self._pending_restore.selected_stock:
             self.stock_panel.select_stock(self._pending_restore.selected_stock)
@@ -596,32 +536,26 @@ class MainWindow(QMainWindow):
             fn=lambda: (
                 stock,
                 add_indicators(self.market_service.load_price_history(stock)),
-                self._load_snapshot_safe(stock),
             ),
             on_success=self._on_price_history_loaded,
             on_failure=lambda message, current_stock=stock: self._handle_price_history_failure(current_stock, message),
         )
 
     def _on_price_history_loaded(self, task: WorkerTask) -> None:
-        stock, frame, snapshot = task.payload
+        stock, frame = task.payload
         if frame.empty:
             raise ValueError("표시할 가격 데이터가 없습니다.")
 
         self.current_stock = stock
         self.current_price_frame = frame
-        self.current_fundamental_snapshot = snapshot
-        self.chart_panel.set_price_data(stock.display_name, frame, preset=self.session_state.chart_preset)
+        self.chart_window.setWindowTitle(f"차트 - {stock.display_name}")
+        self.chart_window.chart_panel.set_price_data(stock.display_name, frame, preset=self.session_state.chart_preset)
+        self.chart_window.reveal()
 
         self._finalize_restore_after_price_load()
 
         self._refresh_workspace_context()
         self.statusBar().showMessage(f"{stock.display_name} 차트와 리포트를 갱신했습니다.", 4000)
-
-    def _load_snapshot_safe(self, stock: StockReference) -> FundamentalSnapshot:
-        try:
-            return self.fundamental_service.load_snapshot(stock)
-        except Exception as exc:
-            return FundamentalSnapshot(notes=[f"재무지표 로드 실패: {exc}"])
 
     def _handle_price_history_failure(self, stock: StockReference, message: str) -> None:
         self.statusBar().showMessage(f"{stock.display_name} 종목을 목록에서 제외했습니다. {message}", 6000)
@@ -739,13 +673,17 @@ class MainWindow(QMainWindow):
             action.setChecked(layer_id in active)
             action.blockSignals(False)
 
+    def _reveal_chart_window(self) -> None:
+        self.chart_window.reveal()
+
     def _set_chart_preset(self, preset: str) -> None:
         self.session_state.chart_preset = preset
-        self.chart_panel.apply_preset(preset)
+        self.chart_window.chart_panel.apply_preset(preset)
         self._refresh_workspace_context()
 
     def _build_session_state(self) -> AppSessionState:
-        chart_start, chart_end = self.chart_panel.visible_range_as_iso()
+        chart_panel = self.chart_window.chart_panel
+        chart_start, chart_end = chart_panel.visible_range_as_iso()
         return AppSessionState(
             market_scope=self.stock_panel.current_market_scope(),
             selected_stock=self.current_stock,
@@ -755,7 +693,7 @@ class MainWindow(QMainWindow):
             chart_preset=self.session_state.chart_preset,
             chart_visible_start=chart_start,
             chart_visible_end=chart_end,
-            chart_tab_index=self.chart_panel.current_tab_index(),
+            chart_tab_index=chart_panel.current_tab_index(),
             splitter_sizes=self.splitter.sizes(),
             llm_config=self.session_state.llm_config,
         )
@@ -800,13 +738,12 @@ class MainWindow(QMainWindow):
             filter_prompt=self.stock_panel.filter_prompt(),
             active_layer_names=active_layer_names,
             llm_config=self.session_state.llm_config,
-            chart_range_text=self.chart_panel.describe_visible_range(),
+            chart_range_text=self.chart_window.chart_panel.describe_visible_range(),
             price_frame=self.current_price_frame,
-            fundamental_snapshot=self.current_fundamental_snapshot,
         )
         self.analysis_panel.set_context_markdown(markdown)
         self.analysis_panel.set_context_table_rows(
-            build_report_rows(self.current_stock, self.current_price_frame, self.current_fundamental_snapshot)
+            build_report_rows(self.current_stock, self.current_price_frame)
         )
 
     def _show_current_status(self) -> None:
@@ -832,7 +769,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._is_closing = True
-        self.chart_panel.begin_shutdown()
+        self.chart_window.prepare_for_shutdown()
         self.thread_pool.clear()
         self.thread_pool.waitForDone(2000)
         super().closeEvent(event)

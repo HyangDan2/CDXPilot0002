@@ -6,27 +6,10 @@ from market_viewer.analysis.filter_models import ParsedFilter
 from market_viewer.analysis.filter_parser import parse_filter_prompt
 from market_viewer.analysis.stock_screener import screen_listing
 from market_viewer.data.market_service import MarketService
-from market_viewer.llm.screening_translator import translate_screening_prompt
-from market_viewer.models import LLMConfig
 
 
 def parse_local_screening_prompt(prompt: str, market_scope: str) -> ParsedFilter:
     return parse_filter_prompt(prompt, market_scope)
-
-
-def interpret_screening_prompt(
-    *,
-    prompt: str,
-    market_scope: str,
-    llm_config: LLMConfig,
-    local_fallback: ParsedFilter,
-) -> ParsedFilter:
-    return translate_screening_prompt(
-        llm_config,
-        prompt,
-        market_scope,
-        local_fallback=local_fallback,
-    )
 
 
 def execute_screening(
@@ -52,10 +35,9 @@ def build_resolved_filter_markdown(parsed: ParsedFilter, market_scope: str) -> s
     conditions = parsed.conditions or []
     condition_lines = "\n".join(f"- {condition.label}" for condition in conditions) if conditions else "- 해석된 조건 없음"
     warnings = "\n".join(f"- {warning}" for warning in parsed.warnings) if parsed.warnings else "- 없음"
-    source_name = "LLM 자연어 해석" if parsed.resolution_source == "llm" else "로컬 보조 규칙"
     return f"""## 해석 결과
 
-- 해석 소스: {source_name}
+- 해석 소스: 메뉴 조건
 - 시장 범위: {markets}
 - 정규화 쿼리: {parsed.normalized_prompt or parsed.original_prompt}
 

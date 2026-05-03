@@ -3,9 +3,10 @@
 ## Active Scope
 
 - Multi-market screener for `KOSPI`, `KOSDAQ`, `TSE`, and `ALL`
-- Left pane: market selection, search, natural-language screener
-- Center pane: candlestick / line chart with pan, zoom, hover, and volume overlay
+- Left pane: market selection, search, screened stock list
+- Separate chart window: candlestick / line chart with pan, zoom, hover, and volume overlay
 - Right pane: session summary/report tab + LLM prompt/result tab
+- Menu-bar screening condition dialog with hardcoded price/volume rules
 - Telegram report delivery
 - YAML session save/load
 
@@ -16,8 +17,9 @@
 - `MainWindow` no longer owns news/disclosure refresh flows or market-data settings wiring.
 - `PySide6` and `shiboken6` are now pinned to `6.11.0` as the target runtime, matching the latest PyPI release checked on 2026-05-01.
 - Worker results are delivered through queued signal connections so UI slots always run on the main thread.
-- KOSPI / KOSDAQ fundamentals now use only `pykrx.get_market_fundamental(date, market=...)` with recent-date fallback, instead of mixing in the more brittle `get_market_fundamental_by_ticker()` path.
-- Fundamental columns are normalized more defensively so `DIV`, `배당수익률`, `PER(배)` style variants can still populate the app's standard fields.
+- LLM-based screening translation was removed. Screening now uses only local hardcoded conditions.
+- Financial statement/fundamental fetching was removed from the app scope, including pykrx fundamental calls and KRX login/environment-variable paths.
+- The main UI was reduced to stock list + analysis panels; charts now live in a separate `ChartWindow`.
 - `chart_panel.py` was reworked so `QChart`, `QLineSeries`, `QCandlestickSeries`, and axes are created once and stored as long-lived attributes.
 - Chart updates no longer use `removeAllSeries()` or axis teardown/rebuild on every refresh.
 - The chart X axis now uses compressed trading-day indexing instead of real calendar spacing, so weekends and market holidays no longer render as empty gaps.
@@ -28,7 +30,6 @@
 
 ## Current Module Set
 
-- `src/market_viewer/data/fundamental_service.py`
 - `src/market_viewer/data/market_registry.py`
 - `src/market_viewer/data/market_service.py`
 - `src/market_viewer/services/context_service.py`
@@ -38,8 +39,10 @@
 - `src/market_viewer/services/screening_service.py`
 - `src/market_viewer/ui/analysis_panel.py`
 - `src/market_viewer/ui/chart_panel.py`
+- `src/market_viewer/ui/chart_window.py`
 - `src/market_viewer/ui/interactive_chart_view.py`
 - `src/market_viewer/ui/main_window.py`
+- `src/market_viewer/ui/screening_dialog.py`
 - `src/market_viewer/ui/stock_list_panel.py`
 - `src/market_viewer/ui/worker.py`
 
@@ -50,16 +53,20 @@
 - `src/market_viewer/services/intelligence_presenter.py`
 - `src/market_viewer/ui/market_data_settings_dialog.py`
 - `src/market_viewer/ui/widgets/feed_table.py`
+- `src/market_viewer/data/fundamental_service.py`
+- `src/market_viewer/llm/screening_translator.py`
+- `src/market_viewer/llm/screening_schema.py`
+- KRX Open API draft modules tied to fundamentals configuration
 
 ## Remaining Risks
 
 - The biggest runtime risk remains QtCharts behavior on macOS ARM under heavier real-world interaction, even after moving updates to the GUI thread and stabilizing object ownership.
 - `InteractiveChartView` hover/paint behavior is still event-heavy, so repeated manual testing on resize, close, fast stock switching, and wheel zoom is still important.
-- `MainWindow` is cleaner than before, but it still owns most application orchestration and would benefit from controller extraction later.
+- `MainWindow` is lighter than before, but it still owns most application orchestration and would benefit from controller extraction later.
 
 ## Suggested Next Checks
 
-1. Launch the app and switch stocks repeatedly while panning/zooming both chart tabs.
-2. Close the window during an active listing load and during an active price-history load.
+1. Launch the app and open `Screening > 조건 설정`, then apply each hardcoded preset.
+2. Open the chart window and switch stocks repeatedly while panning/zooming both chart tabs.
 3. Confirm the chart debug log always prints the main thread when updates apply.
 4. If crashes continue on `6.11.0`, reduce repaint churn further by throttling or temporarily disabling hover crosshair repaint during rapid pan/zoom.

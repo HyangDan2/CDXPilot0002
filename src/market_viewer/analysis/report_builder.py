@@ -4,8 +4,7 @@ import math
 
 import pandas as pd
 
-from market_viewer.data.fundamental_service import safe_metric_text
-from market_viewer.models import FundamentalSnapshot, LLMConfig, StockReference
+from market_viewer.models import LLMConfig, StockReference
 
 
 def _safe_value(value: float | int | None, digits: int = 2) -> str:
@@ -19,7 +18,6 @@ def _safe_value(value: float | int | None, digits: int = 2) -> str:
 def build_stock_report(
     stock: StockReference,
     frame: pd.DataFrame,
-    snapshot: FundamentalSnapshot | None = None,
 ) -> str:
     latest = frame.iloc[-1]
     previous = frame.iloc[-2] if len(frame) > 1 else latest
@@ -41,19 +39,6 @@ def build_stock_report(
     if pd.notna(ma60) and close < ma60:
         trend = "중기 약세 경계"
 
-    valuation_lines = ""
-    if snapshot is not None:
-        valuation_lines = f"""
-
-## 밸류에이션
-- 기준일: {snapshot.as_of_date or "-"}
-- PER / PBR: {safe_metric_text(snapshot.values.get('PER'))} / {safe_metric_text(snapshot.values.get('PBR'))}
-- EPS / BPS: {safe_metric_text(snapshot.values.get('EPS'))} / {safe_metric_text(snapshot.values.get('BPS'))}
-- 배당수익률 / DPS: {safe_metric_text(snapshot.values.get('DividendYield'))} / {safe_metric_text(snapshot.values.get('DPS'))}
-"""
-        if snapshot.notes:
-            valuation_lines += "\n" + "\n".join(f"- 비고: {note}" for note in snapshot.notes)
-
     return f"""# {stock.name} ({stock.code})
 
 ## 종목 정보
@@ -70,11 +55,10 @@ def build_stock_report(
 - MACD / Signal: {_safe_value(macd)} / {_safe_value(macd_signal)}
 - 거래량 비율: {_safe_value(volume_ratio)}
 - 20일 수익률: {_safe_value(return_20d)}%
-{valuation_lines}
 
 ## 체크포인트
 - 차트는 드래그로 좌우 기간 이동, 휠로 확대/축소할 수 있습니다.
-- 필터 프롬프트는 좌측 스크리너에서, 분석 요청은 우측 입력창에서 관리합니다.
+- 스크리너 조건은 메뉴바에서 관리하고, 분석 요청은 우측 입력창에서 관리합니다.
 - 프롬프트 레이어는 메뉴바에서 토글해 LLM 분석 톤과 관점을 조절합니다.
 """
 

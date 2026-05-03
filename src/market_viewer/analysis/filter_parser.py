@@ -30,10 +30,10 @@ def parse_filter_prompt(prompt: str, default_market_scope: str) -> ParsedFilter:
     _parse_moving_average_conditions(normalized, lower, conditions)
     _parse_rsi_conditions(normalized, lower, conditions)
     _parse_volume_conditions(normalized, lower, conditions)
-    _parse_fundamental_conditions(normalized, lower, conditions)
     _parse_return_conditions(normalized, lower, conditions, warnings)
     _parse_macd_conditions(normalized, lower, conditions)
     _parse_structure_conditions(normalized, lower, conditions)
+    _parse_ma_cross_conditions(normalized, lower, conditions)
     _parse_high_break_conditions(normalized, lower, conditions, warnings)
 
     market_scope_override = markets or _expand_default_scope(default_market_scope)
@@ -55,7 +55,7 @@ def parse_filter_prompt(prompt: str, default_market_scope: str) -> ParsedFilter:
 
 
 def _parse_moving_average_conditions(text: str, lower: str, conditions: list[FilterCondition]) -> None:
-    for window in (5, 20, 60, 120):
+    for window in (5, 20, 60, 120, 224):
         if f"{window}일선 위" in text or f"price > ma{window}" in lower or f"ma{window} above" in lower:
             conditions.append(FilterCondition("price_vs_ma", ">", window, f"종가 > MA{window}"))
         if f"{window}일선 아래" in text or f"price < ma{window}" in lower or f"ma{window} below" in lower:
@@ -89,47 +89,6 @@ def _parse_volume_conditions(text: str, lower: str, conditions: list[FilterCondi
     if volume_ratio_match:
         value = float(volume_ratio_match.group(1))
         conditions.append(FilterCondition("VolumeRatio", ">=", value, f"거래량 비율 >= {value:g}"))
-
-
-def _parse_fundamental_conditions(text: str, lower: str, conditions: list[FilterCondition]) -> None:
-    field_patterns = {
-        "PER": r"per\s*(>=|<=|>|<|=)?\s*([0-9]+(?:\.[0-9]+)?)",
-        "PBR": r"pbr\s*(>=|<=|>|<|=)?\s*([0-9]+(?:\.[0-9]+)?)",
-        "EPS": r"eps\s*(>=|<=|>|<|=)?\s*([0-9]+(?:\.[0-9]+)?)",
-        "BPS": r"bps\s*(>=|<=|>|<|=)?\s*([0-9]+(?:\.[0-9]+)?)",
-    }
-    for field, pattern in field_patterns.items():
-        match = re.search(pattern, lower)
-        if match:
-            operator = match.group(1) or "<="
-            value = float(match.group(2))
-            label = f"{field} {operator} {value:g}"
-            conditions.append(FilterCondition(field, operator, value, label))
-
-    korean_patterns = {
-        "PER": r"per\s*([0-9]+(?:\.[0-9]+)?)\s*(이상|이하)",
-        "PBR": r"pbr\s*([0-9]+(?:\.[0-9]+)?)\s*(이상|이하)",
-        "EPS": r"eps\s*([0-9]+(?:\.[0-9]+)?)\s*(이상|이하)",
-        "BPS": r"bps\s*([0-9]+(?:\.[0-9]+)?)\s*(이상|이하)",
-    }
-    for field, pattern in korean_patterns.items():
-        match = re.search(pattern, lower)
-        if match:
-            value = float(match.group(1))
-            operator = ">=" if match.group(2) == "이상" else "<="
-            conditions.append(FilterCondition(field, operator, value, f"{field} {operator} {value:g}"))
-
-    dividend_match = re.search(r"(?:배당수익률|div(?:idend)? yield)\s*(>=|<=|>|<|=)?\s*([0-9]+(?:\.[0-9]+)?)", lower)
-    if dividend_match:
-        operator = dividend_match.group(1) or ">="
-        value = float(dividend_match.group(2))
-        conditions.append(FilterCondition("DividendYield", operator, value, f"배당수익률 {operator} {value:g}"))
-    else:
-        dividend_korean_match = re.search(r"(?:배당수익률)\s*([0-9]+(?:\.[0-9]+)?)\s*(이상|이하)", text)
-        if dividend_korean_match:
-            value = float(dividend_korean_match.group(1))
-            operator = ">=" if dividend_korean_match.group(2) == "이상" else "<="
-            conditions.append(FilterCondition("DividendYield", operator, value, f"배당수익률 {operator} {value:g}"))
 
 
 def _parse_return_conditions(
@@ -168,6 +127,18 @@ def _parse_structure_conditions(text: str, lower: str, conditions: list[FilterCo
         conditions.append(FilterCondition("MA_ALIGNMENT", "==", "bullish_5_20_60", "정배열(MA5 > MA20 > MA60)"))
     if "역배열" in text or "bearish alignment" in lower:
         conditions.append(FilterCondition("MA_ALIGNMENT", "==", "bearish_5_20_60", "역배열(MA5 < MA20 < MA60)"))
+
+
+def _parse_ma_cross_conditions(text: str, lower: str, conditions: list[FilterCondition]) -> None:
+    cross_patterns = [
+        ("ma5 golden cross ma20", "golden_5_20", "MA5 상향 MA20"),
+        ("ma20 golden cross ma60", "golden_20_60", "MA20 상향 MA60"),
+        ("ma20 golden cross ma224", "golden_20_224", "MA20 상향 MA224"),
+        ("ma60 golden cross ma224", "golden_60_224", "MA60 상향 MA224"),
+    ]
+    for token, value, label in cross_patterns:
+        if token in lower:
+            conditions.append(FilterCondition("MA_CROSS", "==", value, label))
 
 
 def _parse_high_break_conditions(

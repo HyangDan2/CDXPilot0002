@@ -59,14 +59,6 @@ def _matches_conditions(frame: pd.DataFrame, listing_row: pd.Series, conditions:
     previous = frame.iloc[-2] if len(frame) > 1 else latest
 
     for condition in conditions:
-        if condition.field in {"PER", "PBR", "EPS", "BPS", "DividendYield"}:
-            field_value = listing_row.get(condition.field)
-            if pd.isna(field_value):
-                return False
-            if not _compare(float(field_value), condition.operator, float(condition.value)):
-                return False
-            continue
-
         if condition.field == "price_vs_ma":
             moving_average = latest.get(f"MA{int(condition.value)}")
             if pd.isna(moving_average):
@@ -110,6 +102,25 @@ def _matches_conditions(frame: pd.DataFrame, listing_row: pd.Series, conditions:
             if condition.value == "bullish_5_20_60" and not (ma5 > ma20 > ma60):
                 return False
             if condition.value == "bearish_5_20_60" and not (ma5 < ma20 < ma60):
+                return False
+            continue
+
+        if condition.field == "MA_CROSS":
+            left_window, right_window = {
+                "golden_5_20": (5, 20),
+                "golden_20_60": (20, 60),
+                "golden_20_224": (20, 224),
+                "golden_60_224": (60, 224),
+            }.get(str(condition.value), (0, 0))
+            if not left_window or not right_window:
+                return False
+            prev_left = previous.get(f"MA{left_window}")
+            prev_right = previous.get(f"MA{right_window}")
+            curr_left = latest.get(f"MA{left_window}")
+            curr_right = latest.get(f"MA{right_window}")
+            if any(pd.isna(value) for value in [prev_left, prev_right, curr_left, curr_right]):
+                return False
+            if not (prev_left <= prev_right and curr_left > curr_right):
                 return False
             continue
 

@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 import time
 
-import FinanceDataReader as fdr
 import pandas as pd
 
 from market_viewer.data.market_registry import get_listing_sources
@@ -58,6 +57,8 @@ class MarketService:
         errors: list[str] = []
         for symbol in symbols:
             try:
+                import FinanceDataReader as fdr
+
                 candidate = fdr.DataReader(symbol, start).reset_index()
                 if not candidate.empty:
                     frame = candidate
@@ -104,6 +105,8 @@ class MarketService:
     def _load_source_listing(self, source_market: str) -> pd.DataFrame:
         if source_market in self._listing_cache:
             return self._listing_cache[source_market].copy()
+
+        import FinanceDataReader as fdr
 
         listing = fdr.StockListing(source_market).copy()
         listing = self._normalize_listing(listing, source_market)
