@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import math
-
 import pandas as pd
 
-from market_viewer.models import LLMConfig, StockReference
+from market_viewer.models import FundamentalSnapshot, LLMConfig, StockReference
 
 
-def _safe_value(value: float | int | None, digits: int = 2) -> str:
-    if value is None or (isinstance(value, float) and math.isnan(value)):
+def _safe_value(value: object, digits: int = 2) -> str:
+    if value is None:
         return "-"
     if pd.isna(value):
         return "-"
@@ -18,6 +16,7 @@ def _safe_value(value: float | int | None, digits: int = 2) -> str:
 def build_stock_report(
     stock: StockReference,
     frame: pd.DataFrame,
+    snapshot: FundamentalSnapshot | None = None,
 ) -> str:
     latest = frame.iloc[-1]
     previous = frame.iloc[-2] if len(frame) > 1 else latest
@@ -39,6 +38,21 @@ def build_stock_report(
     if pd.notna(ma60) and close < ma60:
         trend = "중기 약세 경계"
 
+    fundamental_lines = ""
+    if snapshot is not None:
+        values = snapshot.values
+        fundamental_lines = f"""
+
+## 키움 기본정보 / 재무 스냅샷
+- 기준일: {snapshot.as_of_date or "-"}
+- PER / PBR / ROE: {_safe_value(values.get("PER"))} / {_safe_value(values.get("PBR"))} / {_safe_value(values.get("ROE"))}
+- EPS / BPS: {_safe_value(values.get("EPS"))} / {_safe_value(values.get("BPS"))}
+- 매출액 / 영업이익 / 순이익: {_safe_value(values.get("Revenue"), 0)} / {_safe_value(values.get("OperatingProfit"), 0)} / {_safe_value(values.get("NetIncome"), 0)}
+- 시가총액 / 외인소진률: {_safe_value(values.get("MarketCap"), 0)} / {_safe_value(values.get("ForeignOwnershipRatio"))}
+"""
+        if snapshot.notes:
+            fundamental_lines += "\n" + "\n".join(f"- 비고: {note}" for note in snapshot.notes)
+
     return f"""# {stock.name} ({stock.code})
 
 ## 종목 정보
@@ -55,6 +69,7 @@ def build_stock_report(
 - MACD / Signal: {_safe_value(macd)} / {_safe_value(macd_signal)}
 - 거래량 비율: {_safe_value(volume_ratio)}
 - 20일 수익률: {_safe_value(return_20d)}%
+{fundamental_lines}
 
 ## 체크포인트
 - 차트는 드래그로 좌우 기간 이동, 휠로 확대/축소할 수 있습니다.

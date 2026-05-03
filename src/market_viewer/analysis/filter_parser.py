@@ -8,9 +8,7 @@ from market_viewer.analysis.filter_models import FilterCondition, ParsedFilter
 MARKET_ALIASES = {
     "KOSPI": ["코스피", "kospi"],
     "KOSDAQ": ["코스닥", "kosdaq"],
-    "TSE": ["일본", "도쿄", "tse", "japan", "tokyo"],
     "KRX_ALL": ["krx", "한국시장", "국내시장"],
-    "ALL": ["all", "전체시장"],
 }
 
 SUPPORTED_RETURN_WINDOWS = {5, 20, 60, 120}
@@ -30,6 +28,7 @@ def parse_filter_prompt(prompt: str, default_market_scope: str) -> ParsedFilter:
     _parse_moving_average_conditions(normalized, lower, conditions)
     _parse_rsi_conditions(normalized, lower, conditions)
     _parse_volume_conditions(normalized, lower, conditions)
+    _parse_fundamental_conditions(normalized, lower, conditions)
     _parse_return_conditions(normalized, lower, conditions, warnings)
     _parse_macd_conditions(normalized, lower, conditions)
     _parse_structure_conditions(normalized, lower, conditions)
@@ -89,6 +88,32 @@ def _parse_volume_conditions(text: str, lower: str, conditions: list[FilterCondi
     if volume_ratio_match:
         value = float(volume_ratio_match.group(1))
         conditions.append(FilterCondition("VolumeRatio", ">=", value, f"거래량 비율 >= {value:g}"))
+
+
+def _parse_fundamental_conditions(text: str, lower: str, conditions: list[FilterCondition]) -> None:
+    field_patterns = {
+        "PER": r"per\s*(>=|<=|>|<|=)?\s*([0-9]+(?:\.[0-9]+)?)",
+        "PBR": r"pbr\s*(>=|<=|>|<|=)?\s*([0-9]+(?:\.[0-9]+)?)",
+        "ROE": r"roe\s*(>=|<=|>|<|=)?\s*([0-9]+(?:\.[0-9]+)?)",
+        "EPS": r"eps\s*(>=|<=|>|<|=)?\s*([0-9]+(?:\.[0-9]+)?)",
+        "BPS": r"bps\s*(>=|<=|>|<|=)?\s*([0-9]+(?:\.[0-9]+)?)",
+    }
+    for field, pattern in field_patterns.items():
+        match = re.search(pattern, lower)
+        if not match:
+            continue
+        operator = match.group(1) or (">=" if field in {"ROE", "EPS", "BPS"} else "<=")
+        value = float(match.group(2))
+        conditions.append(FilterCondition(field, operator, value, f"{field} {operator} {value:g}"))
+
+    profit_patterns = [
+        ("영업이익 양수", "OperatingProfit", ">", 0.0, "영업이익 > 0"),
+        ("순이익 양수", "NetIncome", ">", 0.0, "순이익 > 0"),
+        ("당기순이익 양수", "NetIncome", ">", 0.0, "당기순이익 > 0"),
+    ]
+    for token, field, operator, value, label in profit_patterns:
+        if token in text:
+            conditions.append(FilterCondition(field, operator, value, label))
 
 
 def _parse_return_conditions(
@@ -166,8 +191,6 @@ def _extract_markets(lower_prompt: str) -> list[str]:
         if any(alias in lower_prompt for alias in aliases):
             if market_id == "KRX_ALL":
                 matched.extend(["KOSPI", "KOSDAQ"])
-            elif market_id == "ALL":
-                matched.extend(["KOSPI", "KOSDAQ", "TSE"])
             else:
                 matched.append(market_id)
     return list(dict.fromkeys(matched))
@@ -176,8 +199,6 @@ def _extract_markets(lower_prompt: str) -> list[str]:
 def _expand_default_scope(default_market_scope: str) -> list[str]:
     if default_market_scope == "KRX_ALL":
         return ["KOSPI", "KOSDAQ"]
-    if default_market_scope == "ALL":
-        return ["KOSPI", "KOSDAQ", "TSE"]
     return [default_market_scope]
 
 

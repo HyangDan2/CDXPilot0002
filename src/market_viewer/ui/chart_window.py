@@ -7,8 +7,8 @@ from market_viewer.ui.chart_panel import ChartPanel
 
 
 class ChartWindow(QMainWindow):
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
+    def __init__(self) -> None:
+        super().__init__()
         self._allow_close = False
         self.chart_panel = ChartPanel()
         self.setWindowTitle("차트")

@@ -8,3 +8,13 @@ llm:
 telegram:
   bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
   chat_id: "YOUR_TELEGRAM_CHAT_ID"
+kiwoom:
+  enabled: false
+  mock: false
+  base_url: "https://api.kiwoom.com"
+  mock_base_url: "https://mockapi.kiwoom.com"
+  websocket_url: "wss://api.kiwoom.com:10000"
+  mock_websocket_url: "wss://mockapi.kiwoom.com:10000"
+  appkey: ""
+  secretkey: ""
+  token_cache_enabled: true

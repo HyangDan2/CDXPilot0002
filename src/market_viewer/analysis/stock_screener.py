@@ -6,6 +6,19 @@ from market_viewer.analysis.filter_models import FilterCondition, ParsedFilter
 from market_viewer.analysis.indicators import add_indicators
 from market_viewer.data.market_service import MarketService
 
+FUNDAMENTAL_FIELDS = {
+    "PER",
+    "PBR",
+    "ROE",
+    "EPS",
+    "BPS",
+    "Revenue",
+    "OperatingProfit",
+    "NetIncome",
+    "MarketCap",
+    "ForeignOwnershipRatio",
+}
+
 
 def screen_listing(
     market_service: MarketService,
@@ -29,12 +42,18 @@ def screen_listing(
         stock = market_service.build_stock_reference(row)
         try:
             frame = add_indicators(market_service.load_price_history(stock, months=months))
-            if _matches_conditions(frame, row, parsed_filter.conditions):
+            fundamentals = {}
+            if any(condition.field in FUNDAMENTAL_FIELDS for condition in parsed_filter.conditions):
+                fundamentals = market_service.load_fundamental_snapshot(stock).values
+            if _matches_conditions(frame, row, parsed_filter.conditions, fundamentals):
                 latest = frame.iloc[-1]
                 enriched_row = row.copy()
                 for field in ["MA20", "MA60", "RSI14", "MACD", "VolumeRatio", "Return20D"]:
                     if field in latest:
                         enriched_row[field] = latest[field]
+                for field, value in fundamentals.items():
+                    if field in FUNDAMENTAL_FIELDS:
+                        enriched_row[field] = value
                 matched_rows.append(enriched_row)
         except Exception as exc:
             failures += 1
@@ -52,13 +71,27 @@ def screen_listing(
     return result, warnings
 
 
-def _matches_conditions(frame: pd.DataFrame, listing_row: pd.Series, conditions: list[FilterCondition]) -> bool:
+def _matches_conditions(
+    frame: pd.DataFrame,
+    listing_row: pd.Series,
+    conditions: list[FilterCondition],
+    fundamentals: dict[str, object] | None = None,
+) -> bool:
     if frame.empty:
         return False
     latest = frame.iloc[-1]
     previous = frame.iloc[-2] if len(frame) > 1 else latest
+    fundamentals = fundamentals or {}
 
     for condition in conditions:
+        if condition.field in FUNDAMENTAL_FIELDS:
+            field_value = fundamentals.get(condition.field)
+            if field_value is None or pd.isna(field_value):
+                return False
+            if not _compare(float(field_value), condition.operator, float(condition.value)):
+                return False
+            continue
+
         if condition.field == "price_vs_ma":
             moving_average = latest.get(f"MA{int(condition.value)}")
             if pd.isna(moving_average):

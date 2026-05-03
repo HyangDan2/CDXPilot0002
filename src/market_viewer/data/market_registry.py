@@ -18,13 +18,6 @@ MARKET_REGISTRY: dict[str, MarketDefinition] = {
         currency="KRW",
         listing_sources=("KOSDAQ",),
     ),
-    "TSE": MarketDefinition(
-        id="TSE",
-        label="Tokyo Stock Exchange",
-        country="JP",
-        currency="JPY",
-        listing_sources=("TSE",),
-    ),
     "KRX_ALL": MarketDefinition(
         id="KRX_ALL",
         label="KRX ALL",
@@ -32,17 +25,10 @@ MARKET_REGISTRY: dict[str, MarketDefinition] = {
         currency="KRW",
         listing_sources=("KOSPI", "KOSDAQ"),
     ),
-    "ALL": MarketDefinition(
-        id="ALL",
-        label="KR + JP ALL",
-        country="MULTI",
-        currency="MULTI",
-        listing_sources=("KOSPI", "KOSDAQ", "TSE"),
-    ),
 }
 
 
-DEFAULT_MARKET_ORDER = ["KOSPI", "KOSDAQ", "KRX_ALL", "TSE", "ALL"]
+DEFAULT_MARKET_ORDER = ["KOSPI", "KOSDAQ", "KRX_ALL"]
 
 
 def get_market_definition(market_id: str) -> MarketDefinition:

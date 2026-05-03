@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QFileDialog, QMainWindow, QMessageBox, QSplitter, 
 from market_viewer.analysis.filter_models import ParsedFilter
 from market_viewer.analysis.indicators import add_indicators
 from market_viewer.config.app_config_store import (
+    load_kiwoom_config,
     load_llm_config,
     load_telegram_config,
     save_app_configs,
@@ -15,7 +16,7 @@ from market_viewer.config.app_config_store import (
 from market_viewer.config.session_store import load_session, save_session
 from market_viewer.data.market_registry import list_market_scopes
 from market_viewer.data.market_service import MarketService
-from market_viewer.models import AppSessionState, StockReference
+from market_viewer.models import AppSessionState, FundamentalSnapshot, StockReference
 from market_viewer.prompt_layers.layer_registry import get_prompt_layer, list_prompt_layers
 from market_viewer.services.context_service import build_workspace_context_markdown
 from market_viewer.services.intelligence_service import build_report_rows
@@ -29,6 +30,7 @@ from market_viewer.services.screening_service import (
 from market_viewer.telegram.client import send_telegram_report
 from market_viewer.ui.analysis_panel import AnalysisPanel
 from market_viewer.ui.chart_window import ChartWindow
+from market_viewer.ui.kiwoom_settings_dialog import KiwoomSettingsDialog
 from market_viewer.ui.llm_settings_dialog import LLMSettingsDialog
 from market_viewer.ui.screening_dialog import ScreeningDialog
 from market_viewer.ui.stock_list_panel import StockListPanel
@@ -40,13 +42,15 @@ class MainWindow(QMainWindow):
     CHANNEL_LISTING = "listing"
     CHANNEL_SCREEN = "screen"
     CHANNEL_PRICE = "price"
+    CHANNEL_KIWOOM_TEST = "kiwoom_test"
     CHANNEL_LLM_TEST = "llm_test"
     CHANNEL_LLM_ANALYSIS = "llm_analysis"
     CHANNEL_TELEGRAM = "telegram"
 
     def __init__(self) -> None:
         super().__init__()
-        self.market_service = MarketService()
+        self.kiwoom_config = load_kiwoom_config()
+        self.market_service = MarketService(self.kiwoom_config)
         self.thread_pool = QThreadPool.globalInstance()
         self.session_state = AppSessionState()
         self.session_state.llm_config = load_llm_config()
@@ -54,6 +58,7 @@ class MainWindow(QMainWindow):
         self.current_listing = pd.DataFrame()
         self.current_stock: StockReference | None = None
         self.current_price_frame: pd.DataFrame | None = None
+        self.current_fundamental_snapshot: FundamentalSnapshot | None = None
         self.current_filter = ParsedFilter(original_prompt="", normalized_prompt="")
         self.session_path: str | None = None
         self._pending_restore: AppSessionState | None = None
@@ -76,7 +81,7 @@ class MainWindow(QMainWindow):
         self.stock_panel.set_market_options(list_market_scopes())
         self.stock_panel.set_market_scope(self.session_state.market_scope)
 
-        self.chart_window = ChartWindow(self)
+        self.chart_window: ChartWindow | None = None
         self.analysis_panel = AnalysisPanel()
 
         self.splitter = QSplitter()
@@ -94,6 +99,7 @@ class MainWindow(QMainWindow):
         self.stock_panel.market_scope_changed.connect(self._on_market_scope_changed)
         self.stock_panel.refresh_requested.connect(self._refresh_current_scope)
         self.stock_panel.stock_activated.connect(self._load_price_history)
+        self.stock_panel.search_failed.connect(lambda message: self.statusBar().showMessage(message, 4000))
 
         self.analysis_panel.analyze_requested.connect(self._run_llm_analysis)
         self.analysis_panel.clear_requested.connect(lambda: self.analysis_panel.set_result_markdown(""))
@@ -198,31 +204,31 @@ class MainWindow(QMainWindow):
             self.preset_actions[preset] = action
         self.pan_left_action = self._make_action(
             "차트 왼쪽 이동",
-            lambda: self.chart_window.chart_panel.pan_relative(-0.2),
+            lambda: self._ensure_chart_window().chart_panel.pan_relative(-0.2),
             shortcut="Alt+H",
             register_shortcut=True,
         )
         self.pan_right_action = self._make_action(
             "차트 오른쪽 이동",
-            lambda: self.chart_window.chart_panel.pan_relative(0.2),
+            lambda: self._ensure_chart_window().chart_panel.pan_relative(0.2),
             shortcut="Alt+L",
             register_shortcut=True,
         )
         self.zoom_in_action = self._make_action(
             "차트 확대",
-            lambda: self.chart_window.chart_panel.zoom_relative(0.8),
+            lambda: self._ensure_chart_window().chart_panel.zoom_relative(0.8),
             shortcut="Ctrl+=",
             register_shortcut=True,
         )
         self.zoom_out_action = self._make_action(
             "차트 축소",
-            lambda: self.chart_window.chart_panel.zoom_relative(1.25),
+            lambda: self._ensure_chart_window().chart_panel.zoom_relative(1.25),
             shortcut="Ctrl+-",
             register_shortcut=True,
         )
         self.reset_chart_action = self._make_action(
             "차트 리셋",
-            self.chart_window.chart_panel.reset_range,
+            lambda: self._ensure_chart_window().chart_panel.reset_range(),
             shortcut="Ctrl+0",
             register_shortcut=True,
         )
@@ -255,6 +261,15 @@ class MainWindow(QMainWindow):
             "LLM 결과 발송",
             self._send_llm_report,
         )
+        self.kiwoom_settings_action = self._make_action(
+            "Kiwoom REST 설정",
+            self._open_kiwoom_settings,
+        )
+        self.kiwoom_test_action = self._make_action(
+            "Kiwoom REST 연결 테스트",
+            self._test_kiwoom_connection,
+        )
+
     def _create_menus(self) -> None:
         menu_bar = self.menuBar()
 
@@ -264,6 +279,9 @@ class MainWindow(QMainWindow):
 
         market_menu = menu_bar.addMenu("Market")
         market_menu.addAction(self.refresh_market_action)
+        market_menu.addSeparator()
+        market_menu.addAction(self.kiwoom_settings_action)
+        market_menu.addAction(self.kiwoom_test_action)
 
         screening_menu = menu_bar.addMenu("Screening")
         screening_menu.addAction(self.focus_market_action)
@@ -336,7 +354,7 @@ class MainWindow(QMainWindow):
 
     def _run_worker(self, fn, task_name: str, on_success, on_failure=None) -> None:
         worker = Worker(fn, task_name)
-        # Worker threads must emit plain Python data only. All Qt UI and QtCharts
+        # Worker threads must emit plain Python data only. All Qt UI and chart
         # mutations are funneled back to the GUI thread through queued delivery.
         worker.signals.finished.connect(on_success, Qt.ConnectionType.QueuedConnection)
         worker.signals.failed.connect(on_failure or self._show_error, Qt.ConnectionType.QueuedConnection)
@@ -387,11 +405,22 @@ class MainWindow(QMainWindow):
         self._run_worker(wrapped_fn, task_name, wrapped_success, wrapped_failure)
 
     def _persist_app_configs(self) -> None:
-        save_app_configs(self.session_state.llm_config, self.telegram_config)
+        save_app_configs(self.session_state.llm_config, self.telegram_config, self.kiwoom_config)
+
+    def _ensure_chart_window(self) -> ChartWindow:
+        if self.chart_window is None:
+            self.chart_window = ChartWindow()
+        return self.chart_window
+
+    def _chart_range_text(self) -> str:
+        if self.chart_window is None:
+            return "차트 미표시"
+        return self.chart_window.chart_panel.describe_visible_range()
 
     def _clear_active_stock_context(self) -> None:
         self.current_stock = None
         self.current_price_frame = None
+        self.current_fundamental_snapshot = None
 
     def _restore_pending_selection_after_listing(self) -> None:
         if self._pending_restore is None:
@@ -413,7 +442,7 @@ class MainWindow(QMainWindow):
     def _finalize_restore_after_price_load(self) -> None:
         if self._pending_restore is None:
             return
-        chart_panel = self.chart_window.chart_panel
+        chart_panel = self._ensure_chart_window().chart_panel
         chart_panel.set_tab_index(self._pending_restore.chart_tab_index)
         chart_panel.set_visible_range_from_iso(
             self._pending_restore.chart_visible_start,
@@ -436,6 +465,11 @@ class MainWindow(QMainWindow):
         self._load_listing(self.stock_panel.current_market_scope())
 
     def _load_listing(self, market_scope: str) -> None:
+        if not self.kiwoom_config.connection_ready:
+            self._load_listing_into_table(pd.DataFrame())
+            self.statusBar().showMessage("Kiwoom REST 설정 후 시장 새로고침을 실행하세요.", 6000)
+            self._refresh_workspace_context()
+            return
         self._run_scoped_worker(
             channel=self.CHANNEL_LISTING,
             task_name="listing",
@@ -448,10 +482,7 @@ class MainWindow(QMainWindow):
         market_scope, frame, warnings = task.payload
         self._load_listing_into_table(frame)
         current_scope = self.stock_panel.current_market_scope()
-        if current_scope == "TSE":
-            self.statusBar().showMessage("TSE 종목 목록을 불러왔습니다. 종목을 선택하면 가격을 조회합니다.", 5000)
-        else:
-            self.statusBar().showMessage(f"{current_scope} 종목 목록을 불러왔습니다.", 4000)
+        self.statusBar().showMessage(f"{current_scope} 종목 목록을 불러왔습니다.", 4000)
         if warnings:
             self.statusBar().showMessage(" | ".join(warnings[:2]), 5000)
         self._refresh_workspace_context()
@@ -536,21 +567,24 @@ class MainWindow(QMainWindow):
             fn=lambda: (
                 stock,
                 add_indicators(self.market_service.load_price_history(stock)),
+                self.market_service.load_fundamental_snapshot(stock),
             ),
             on_success=self._on_price_history_loaded,
             on_failure=lambda message, current_stock=stock: self._handle_price_history_failure(current_stock, message),
         )
 
     def _on_price_history_loaded(self, task: WorkerTask) -> None:
-        stock, frame = task.payload
+        stock, frame, snapshot = task.payload
         if frame.empty:
             raise ValueError("표시할 가격 데이터가 없습니다.")
 
         self.current_stock = stock
         self.current_price_frame = frame
-        self.chart_window.setWindowTitle(f"차트 - {stock.display_name}")
-        self.chart_window.chart_panel.set_price_data(stock.display_name, frame, preset=self.session_state.chart_preset)
-        self.chart_window.reveal()
+        self.current_fundamental_snapshot = snapshot
+        chart_window = self._ensure_chart_window()
+        chart_window.setWindowTitle(f"차트 - {stock.display_name}")
+        chart_window.chart_panel.set_price_data(stock.display_name, frame, preset=self.session_state.chart_preset)
+        chart_window.reveal()
 
         self._finalize_restore_after_price_load()
 
@@ -584,6 +618,33 @@ class MainWindow(QMainWindow):
             self._persist_app_configs()
             self.statusBar().showMessage("Telegram 설정을 갱신했습니다.", 4000)
 
+    def _open_kiwoom_settings(self) -> None:
+        dialog = KiwoomSettingsDialog(self.kiwoom_config, self)
+        if dialog.exec():
+            self.kiwoom_config = dialog.get_config()
+            self.market_service = MarketService(self.kiwoom_config)
+            self._persist_app_configs()
+            self.statusBar().showMessage("Kiwoom REST 설정을 갱신했습니다.", 4000)
+            if self.kiwoom_config.connection_ready:
+                self._load_listing(self.stock_panel.current_market_scope())
+
+    def _test_kiwoom_connection(self) -> None:
+        if not self.kiwoom_config.connection_ready:
+            self._show_error("Kiwoom REST appkey/secretkey와 backend 사용 여부를 확인하세요.")
+            return
+        self._run_scoped_worker(
+            channel=self.CHANNEL_KIWOOM_TEST,
+            task_name="kiwoom_test",
+            status_message="Kiwoom REST 연결 테스트 중입니다...",
+            fn=self.market_service.test_connection,
+            on_success=self._on_kiwoom_test_completed,
+            modal_error=True,
+        )
+
+    def _on_kiwoom_test_completed(self, task: WorkerTask) -> None:
+        self.analysis_panel.set_result_markdown(f"## Kiwoom REST 연결 테스트\n\n{task.payload}")
+        self.statusBar().showMessage("Kiwoom REST 연결 테스트가 완료되었습니다.", 4000)
+
     def _test_llm_connection(self) -> None:
         if not self.session_state.llm_config.connection_ready:
             self._show_error("LLM 연결 정보를 먼저 입력하세요.")
@@ -610,6 +671,7 @@ class MainWindow(QMainWindow):
 
         stock = self.current_stock
         frame = self.current_price_frame.copy()
+        snapshot = self.current_fundamental_snapshot
         filter_prompt = self.stock_panel.filter_prompt()
         config = self.session_state.llm_config
         active_layers = self.session_state.active_prompt_layers.copy()
@@ -624,6 +686,7 @@ class MainWindow(QMainWindow):
                 frame=frame,
                 filter_prompt=filter_prompt,
                 user_request=user_request,
+                fundamental_snapshot=snapshot,
             ),
             on_success=self._on_llm_analysis_completed,
         )
@@ -674,16 +737,22 @@ class MainWindow(QMainWindow):
             action.blockSignals(False)
 
     def _reveal_chart_window(self) -> None:
-        self.chart_window.reveal()
+        self._ensure_chart_window().reveal()
 
     def _set_chart_preset(self, preset: str) -> None:
         self.session_state.chart_preset = preset
-        self.chart_window.chart_panel.apply_preset(preset)
+        if self.chart_window is not None:
+            self.chart_window.chart_panel.apply_preset(preset)
         self._refresh_workspace_context()
 
     def _build_session_state(self) -> AppSessionState:
-        chart_panel = self.chart_window.chart_panel
-        chart_start, chart_end = chart_panel.visible_range_as_iso()
+        chart_start: str | None = None
+        chart_end: str | None = None
+        chart_tab_index = 0
+        if self.chart_window is not None:
+            chart_panel = self.chart_window.chart_panel
+            chart_start, chart_end = chart_panel.visible_range_as_iso()
+            chart_tab_index = chart_panel.current_tab_index()
         return AppSessionState(
             market_scope=self.stock_panel.current_market_scope(),
             selected_stock=self.current_stock,
@@ -693,7 +762,7 @@ class MainWindow(QMainWindow):
             chart_preset=self.session_state.chart_preset,
             chart_visible_start=chart_start,
             chart_visible_end=chart_end,
-            chart_tab_index=chart_panel.current_tab_index(),
+            chart_tab_index=chart_tab_index,
             splitter_sizes=self.splitter.sizes(),
             llm_config=self.session_state.llm_config,
         )
@@ -738,12 +807,13 @@ class MainWindow(QMainWindow):
             filter_prompt=self.stock_panel.filter_prompt(),
             active_layer_names=active_layer_names,
             llm_config=self.session_state.llm_config,
-            chart_range_text=self.chart_window.chart_panel.describe_visible_range(),
+            chart_range_text=self._chart_range_text(),
             price_frame=self.current_price_frame,
+            fundamental_snapshot=self.current_fundamental_snapshot,
         )
         self.analysis_panel.set_context_markdown(markdown)
         self.analysis_panel.set_context_table_rows(
-            build_report_rows(self.current_stock, self.current_price_frame)
+            build_report_rows(self.current_stock, self.current_price_frame, self.current_fundamental_snapshot)
         )
 
     def _show_current_status(self) -> None:
@@ -769,7 +839,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._is_closing = True
-        self.chart_window.prepare_for_shutdown()
+        if self.chart_window is not None:
+            self.chart_window.prepare_for_shutdown()
         self.thread_pool.clear()
         self.thread_pool.waitForDone(2000)
         super().closeEvent(event)

@@ -80,6 +80,44 @@ class ScreeningDialog(QDialog):
 
         layout.addWidget(momentum_group)
 
+        fundamental_group = QGroupBox("키움 기본정보 / 재무 스냅샷")
+        fundamental_form = QFormLayout(fundamental_group)
+        self.per_check = QCheckBox("PER <=")
+        self.per_spin = QDoubleSpinBox()
+        self.per_spin.setRange(0.0, 500.0)
+        self.per_spin.setDecimals(1)
+        self.per_spin.setValue(20.0)
+        per_row = QHBoxLayout()
+        per_row.addWidget(self.per_check)
+        per_row.addWidget(self.per_spin)
+        fundamental_form.addRow(per_row)
+
+        self.pbr_check = QCheckBox("PBR <=")
+        self.pbr_spin = QDoubleSpinBox()
+        self.pbr_spin.setRange(0.0, 50.0)
+        self.pbr_spin.setDecimals(2)
+        self.pbr_spin.setValue(3.0)
+        pbr_row = QHBoxLayout()
+        pbr_row.addWidget(self.pbr_check)
+        pbr_row.addWidget(self.pbr_spin)
+        fundamental_form.addRow(pbr_row)
+
+        self.roe_check = QCheckBox("ROE >=")
+        self.roe_spin = QDoubleSpinBox()
+        self.roe_spin.setRange(-100.0, 200.0)
+        self.roe_spin.setDecimals(1)
+        self.roe_spin.setValue(5.0)
+        roe_row = QHBoxLayout()
+        roe_row.addWidget(self.roe_check)
+        roe_row.addWidget(self.roe_spin)
+        fundamental_form.addRow(roe_row)
+
+        self.operating_profit_check = QCheckBox("영업이익 양수")
+        self.net_income_check = QCheckBox("순이익 양수")
+        fundamental_form.addRow(self.operating_profit_check)
+        fundamental_form.addRow(self.net_income_check)
+        layout.addWidget(fundamental_group)
+
         preset_row = QHBoxLayout()
         bullish_button = QPushButton("Bullish 프리셋")
         bearish_button = QPushButton("Bearish 프리셋")
@@ -106,9 +144,14 @@ class ScreeningDialog(QDialog):
             self.price_above_224_check,
             self.volume_check,
             self.new_high_check,
+            self.per_check,
+            self.pbr_check,
+            self.roe_check,
+            self.operating_profit_check,
+            self.net_income_check,
         ]:
             widget.toggled.connect(self._sync_summary)
-        for widget in [self.volume_spin]:
+        for widget in [self.volume_spin, self.per_spin, self.pbr_spin, self.roe_spin]:
             widget.valueChanged.connect(self._sync_summary)
         self.cross_combo.currentIndexChanged.connect(self._sync_summary)
 
@@ -132,6 +175,16 @@ class ScreeningDialog(QDialog):
             parts.append(f"거래량 {self.volume_spin.value():g}배 이상")
         if self.new_high_check.isChecked():
             parts.append("60일 신고가")
+        if self.per_check.isChecked():
+            parts.append(f"per <= {self.per_spin.value():g}")
+        if self.pbr_check.isChecked():
+            parts.append(f"pbr <= {self.pbr_spin.value():g}")
+        if self.roe_check.isChecked():
+            parts.append(f"roe >= {self.roe_spin.value():g}")
+        if self.operating_profit_check.isChecked():
+            parts.append("영업이익 양수")
+        if self.net_income_check.isChecked():
+            parts.append("순이익 양수")
         return " / ".join(parts)
 
     def _sync_summary(self) -> None:
@@ -162,6 +215,11 @@ class ScreeningDialog(QDialog):
         self.cross_combo.setCurrentIndex(0)
         self.volume_check.setChecked(False)
         self.new_high_check.setChecked(False)
+        self.per_check.setChecked(False)
+        self.pbr_check.setChecked(False)
+        self.roe_check.setChecked(False)
+        self.operating_profit_check.setChecked(False)
+        self.net_income_check.setChecked(False)
 
     def _load_from_prompt(self, prompt: str) -> None:
         if not prompt.strip():
@@ -192,3 +250,16 @@ class ScreeningDialog(QDialog):
                 self.volume_spin.setValue(float(condition.value))
             elif condition.field == "NEW_HIGH" and int(condition.value) == 60:
                 self.new_high_check.setChecked(True)
+            elif condition.field == "PER" and condition.operator == "<=":
+                self.per_check.setChecked(True)
+                self.per_spin.setValue(float(condition.value))
+            elif condition.field == "PBR" and condition.operator == "<=":
+                self.pbr_check.setChecked(True)
+                self.pbr_spin.setValue(float(condition.value))
+            elif condition.field == "ROE" and condition.operator == ">=":
+                self.roe_check.setChecked(True)
+                self.roe_spin.setValue(float(condition.value))
+            elif condition.field == "OperatingProfit" and condition.operator == ">":
+                self.operating_profit_check.setChecked(True)
+            elif condition.field == "NetIncome" and condition.operator == ">":
+                self.net_income_check.setChecked(True)

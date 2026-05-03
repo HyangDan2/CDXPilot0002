@@ -50,6 +50,38 @@ class TelegramConfig:
 
 
 @dataclass(slots=True)
+class KiwoomConfig:
+    enabled: bool = False
+    mock: bool = False
+    base_url: str = "https://api.kiwoom.com"
+    mock_base_url: str = "https://mockapi.kiwoom.com"
+    websocket_url: str = "wss://api.kiwoom.com:10000"
+    mock_websocket_url: str = "wss://mockapi.kiwoom.com:10000"
+    appkey: str = ""
+    secretkey: str = ""
+    token_cache_enabled: bool = True
+
+    @property
+    def rest_base_url(self) -> str:
+        return self.mock_base_url if self.mock else self.base_url
+
+    @property
+    def active_websocket_url(self) -> str:
+        return self.mock_websocket_url if self.mock else self.websocket_url
+
+    @property
+    def connection_ready(self) -> bool:
+        return bool(self.enabled and self.rest_base_url.strip() and self.appkey.strip() and self.secretkey.strip())
+
+
+@dataclass(slots=True)
+class FundamentalSnapshot:
+    as_of_date: str = ""
+    values: dict[str, float | int | str | None] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class ReportRow:
     section: str
     label: str

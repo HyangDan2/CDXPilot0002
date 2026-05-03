@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from market_viewer.models import ReportRow, StockReference
+from market_viewer.models import FundamentalSnapshot, ReportRow, StockReference
 
 
 def _safe_metric_text(value: object, digits: int = 2) -> str:
@@ -14,6 +14,7 @@ def _safe_metric_text(value: object, digits: int = 2) -> str:
 def build_report_rows(
     stock: StockReference | None,
     price_frame: pd.DataFrame | None,
+    snapshot: FundamentalSnapshot | None = None,
 ) -> list[ReportRow]:
     rows: list[ReportRow] = []
     if stock is not None:
@@ -38,4 +39,22 @@ def build_report_rows(
                 ReportRow("가격/기술", "20일수익률", _safe_metric_text(latest.get("Return20D")) + "%"),
             ]
         )
+    if snapshot is not None:
+        metric_pairs = [
+            ("PER", "PER"),
+            ("PBR", "PBR"),
+            ("ROE", "ROE"),
+            ("EPS", "EPS"),
+            ("BPS", "BPS"),
+            ("매출액", "Revenue"),
+            ("영업이익", "OperatingProfit"),
+            ("순이익", "NetIncome"),
+            ("시가총액", "MarketCap"),
+            ("외인소진률", "ForeignOwnershipRatio"),
+        ]
+        for label, key in metric_pairs:
+            value = snapshot.values.get(key)
+            rows.append(ReportRow("키움 기본정보", label, _safe_metric_text(value), snapshot.as_of_date))
+        for note in snapshot.notes:
+            rows.append(ReportRow("키움 기본정보", "비고", "-", note))
     return rows

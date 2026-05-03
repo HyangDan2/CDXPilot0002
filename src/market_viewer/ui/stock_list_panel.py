@@ -22,12 +22,14 @@ class StockListPanel(QWidget):
     market_scope_changed = Signal(str)
     refresh_requested = Signal()
     stock_activated = Signal(object)
+    search_failed = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
         self._frame = pd.DataFrame()
         self._filter_prompt = ""
         self._is_updating_table = False
+        self._suppress_selection_activation = False
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -52,6 +54,7 @@ class StockListPanel(QWidget):
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("종목명 또는 코드 검색")
         self.search_input.textChanged.connect(self._apply_view_filter)
+        self.search_input.returnPressed.connect(self.activate_search_result)
         layout.addWidget(self.search_input)
 
         resolved_title = QLabel("적용 조건")
@@ -154,6 +157,23 @@ class StockListPanel(QWidget):
         if stock is not None:
             self.stock_activated.emit(stock)
 
+    def activate_search_result(self) -> None:
+        if self.table.rowCount() == 0:
+            self.search_failed.emit("검색 결과가 없습니다.")
+            return
+
+        query = self.search_input.text().strip()
+        if query.isdigit():
+            normalized_code = query.zfill(6)
+            for row in range(self.table.rowCount()):
+                code_item = self.table.item(row, 1)
+                if code_item and code_item.text().strip() == normalized_code:
+                    self._activate_row(row)
+                    return
+
+        current_row = self.table.currentRow()
+        self._activate_row(current_row if current_row >= 0 else 0)
+
     def select_relative_row(self, offset: int, activate: bool = False) -> None:
         if self.table.rowCount() == 0:
             return
@@ -175,6 +195,12 @@ class StockListPanel(QWidget):
         self._is_updating_table = True
         query = self.search_input.text().strip().lower()
         filtered = self._frame
+        required_columns = {"Name", "Code", "Market"}
+        if filtered.empty or not required_columns.issubset(filtered.columns):
+            self.table.setRowCount(0)
+            self.count_label.setText("0 종목")
+            self._is_updating_table = False
+            return
         if query:
             mask = (
                 filtered["Name"].astype(str).str.lower().str.contains(query, na=False)
@@ -216,6 +242,17 @@ class StockListPanel(QWidget):
         if len(filtered) > 0 and auto_activate:
             self.activate_current_selection()
 
+    def _activate_row(self, row: int) -> None:
+        if row < 0 or row >= self.table.rowCount():
+            self.search_failed.emit("선택할 종목이 없습니다.")
+            return
+        self._suppress_selection_activation = True
+        try:
+            self.table.selectRow(row)
+        finally:
+            self._suppress_selection_activation = False
+        self.activate_current_selection()
+
     def _emit_market_scope_changed(self) -> None:
         self.market_scope_changed.emit(self.current_market_scope())
 
@@ -227,6 +264,6 @@ class StockListPanel(QWidget):
                 self.stock_activated.emit(stock)
 
     def _handle_selection_changed(self) -> None:
-        if self._is_updating_table:
+        if self._is_updating_table or self._suppress_selection_activation:
             return
         self.activate_current_selection()

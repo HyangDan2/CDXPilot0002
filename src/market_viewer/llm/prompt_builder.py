@@ -4,7 +4,7 @@ import math
 
 import pandas as pd
 
-from market_viewer.models import StockReference
+from market_viewer.models import FundamentalSnapshot, StockReference
 from market_viewer.prompt_layers.layer_registry import get_prompt_layer
 
 
@@ -30,8 +30,10 @@ def build_user_prompt(
     frame: pd.DataFrame,
     filter_prompt: str,
     user_request: str,
+    fundamental_snapshot: FundamentalSnapshot | None = None,
 ) -> str:
     snapshot = _latest_snapshot_markdown(stock, frame)
+    fundamentals = _fundamentals_markdown(fundamental_snapshot)
     latest_rows = _latest_rows_markdown(frame)
     filter_text = filter_prompt.strip() or "없음"
     user_text = user_request.strip() or "현재 종목의 핵심 포인트를 요약해줘."
@@ -67,6 +69,9 @@ def build_user_prompt(
 
 ## 종목 스냅샷
 {snapshot}
+
+## 키움 기본정보 / 재무 스냅샷
+{fundamentals}
 
 ## 최근 3개 캔들
 {latest_rows}
@@ -110,6 +115,21 @@ def _latest_snapshot_markdown(stock: StockReference, frame: pd.DataFrame) -> str
             f"- 20일 수익률: {_format_number(latest.get('Return20D'))}%",
         ]
     )
+
+
+def _fundamentals_markdown(snapshot: FundamentalSnapshot | None) -> str:
+    if snapshot is None:
+        return "- 없음"
+    values = snapshot.values
+    lines = [
+        f"- 기준일: {snapshot.as_of_date or '-'}",
+        f"- PER / PBR / ROE: {_format_number(values.get('PER'))} / {_format_number(values.get('PBR'))} / {_format_number(values.get('ROE'))}",
+        f"- EPS / BPS: {_format_number(values.get('EPS'))} / {_format_number(values.get('BPS'))}",
+        f"- 매출액 / 영업이익 / 순이익: {_format_number(values.get('Revenue'), 0)} / {_format_number(values.get('OperatingProfit'), 0)} / {_format_number(values.get('NetIncome'), 0)}",
+        f"- 시가총액 / 외인소진률: {_format_number(values.get('MarketCap'), 0)} / {_format_number(values.get('ForeignOwnershipRatio'))}",
+    ]
+    lines.extend(f"- 비고: {note}" for note in snapshot.notes)
+    return "\n".join(lines)
 
 
 def _format_number(value, digits: int = 2) -> str:
