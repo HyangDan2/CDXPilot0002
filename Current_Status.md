@@ -7,7 +7,9 @@
 - Separate chart window: candlestick / line chart with pan, zoom, hover, and volume overlay
 - Stock search activates the visible match on Enter and updates the chart window
 - Right pane: session summary/report tab + LLM prompt/result tab
-- Menu-bar screening condition dialog with hardcoded price/volume/fundamental snapshot rules
+- Menu-bar screening condition table based on the VSPilot0023 custom condition format
+- Screening progress shows processed/total, match count, failure count, percent, elapsed time, and ETA with a Stop button
+- The stock list now uses a lazy `QTableView` / `QAbstractTableModel` path instead of per-cell `QTableWidgetItem` creation, so large `KRX_ALL` listings do not block the UI during table population.
 - Telegram report delivery
 - YAML session save/load
 
@@ -28,11 +30,13 @@
 - Stock search now handles Enter explicitly: numeric input first resolves to a zero-padded six-digit code, then falls back to the current visible selection.
 - Empty Kiwoom/unconfigured listings no longer break the search filter when the user types before data is loaded.
 - `save_app_configs()` now preserves existing YAML sections and writes Kiwoom appkey/secretkey under root `config.yaml > kiwoom`; `config.example.yaml` keeps only blank-format values.
+- Screening conditions now save under `config.yaml > screening.custom_conditions` and use rows with `enabled`, `operand`, `ma_order`, `ma_above`, and metric rules.
 - `chart_panel.py` was replaced with a QtCharts-free QPainter renderer built on `QWidget.paintEvent()`.
 - Candlestick, line, moving averages, volume overlay, bottom date labels, hover tooltip, pan, zoom, reset, and range persistence now run without `QtCharts.framework`.
 - The chart X axis uses compressed trading-day indexing instead of real calendar spacing, so weekends and market holidays no longer render as empty gaps.
 - Price updates replace plain Python chart state and request a repaint through `update()`.
 - Shutdown now stops chart timers, clears pending chart work, clears the worker queue, and waits briefly for worker completion before close.
+- `StockListPanel` was rebuilt around `StockTableModel`, keeping listing data in a DataFrame-backed model and resolving selected/search-enter stocks from model rows on demand.
 
 ## Current Module Set
 
@@ -76,7 +80,7 @@
 
 1. Launch the app and confirm it reaches the main window before any chart is opened.
 2. Type a numeric code such as `005930` or `5930` in the stock search and press Enter; the separate chart window should update.
-3. Open `Screening > 조건 설정`, then apply each hardcoded preset.
+3. Open `Screening > 조건 설정`, edit a condition row, and apply it.
 4. Switch stocks repeatedly while panning/zooming both chart tabs.
 5. Confirm `QtCharts.framework` no longer appears in the process crash report if any crash remains.
 6. If crashes continue on `6.11.0`, inspect non-chart Qt object lifetime next, especially posted events during close/hide.

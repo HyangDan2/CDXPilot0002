@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import time
+
 import pandas as pd
 
+from market_viewer.analysis.condition_evaluator import (
+    conditions_require_fundamentals,
+    conditions_require_price,
+    row_matches_custom_conditions,
+)
 from market_viewer.analysis.filter_models import FilterCondition, ParsedFilter
 from market_viewer.analysis.indicators import add_indicators
 from market_viewer.data.market_service import MarketService
@@ -25,6 +32,8 @@ def screen_listing(
     listing: pd.DataFrame,
     parsed_filter: ParsedFilter,
     months: int = 12,
+    progress_callback=None,
+    cancel_checker=None,
 ) -> tuple[pd.DataFrame, list[str]]:
     working = listing.copy()
     warnings = list(parsed_filter.warnings)
@@ -32,25 +41,48 @@ def screen_listing(
     if parsed_filter.markets:
         working = working[working["Market"].isin(parsed_filter.markets)]
 
-    if not parsed_filter.conditions:
+    if not parsed_filter.conditions and not parsed_filter.custom_conditions:
         return working.reset_index(drop=True), warnings
 
     matched_rows: list[pd.Series] = []
     failures = 0
+    total = len(working)
+    started_at = time.monotonic()
+    stopped = False
+    needs_price = bool(parsed_filter.conditions) or conditions_require_price(parsed_filter.custom_conditions)
+    needs_fundamentals = (
+        any(condition.field in FUNDAMENTAL_FIELDS for condition in parsed_filter.conditions)
+        or conditions_require_fundamentals(parsed_filter.custom_conditions)
+    )
 
-    for _, row in working.iterrows():
+    for done, (_, row) in enumerate(working.iterrows(), start=1):
+        if cancel_checker is not None and cancel_checker():
+            stopped = True
+            _emit_progress(progress_callback, done - 1, total, len(matched_rows), failures, row, started_at, stopped=True)
+            break
         stock = market_service.build_stock_reference(row)
         try:
-            frame = add_indicators(market_service.load_price_history(stock, months=months))
+            frame = None
+            latest = None
+            if needs_price:
+                frame = add_indicators(market_service.load_price_history(stock, months=months))
+                latest = frame.iloc[-1] if not frame.empty else None
             fundamentals = {}
-            if any(condition.field in FUNDAMENTAL_FIELDS for condition in parsed_filter.conditions):
+            if needs_fundamentals:
                 fundamentals = market_service.load_fundamental_snapshot(stock).values
-            if _matches_conditions(frame, row, parsed_filter.conditions, fundamentals):
-                latest = frame.iloc[-1]
+            legacy_match = True
+            if parsed_filter.conditions:
+                if frame is None:
+                    legacy_match = False
+                else:
+                    legacy_match = _matches_conditions(frame, row, parsed_filter.conditions, fundamentals)
+            custom_match = row_matches_custom_conditions(parsed_filter.custom_conditions, latest, fundamentals)
+            if legacy_match and custom_match:
                 enriched_row = row.copy()
-                for field in ["MA20", "MA60", "RSI14", "MACD", "VolumeRatio", "Return20D"]:
-                    if field in latest:
-                        enriched_row[field] = latest[field]
+                if latest is not None:
+                    for field in ["MA20", "MA60", "RSI14", "MACD", "VolumeRatio", "Return20D", "VolumeMA20"]:
+                        if field in latest:
+                            enriched_row[field] = latest[field]
                 for field, value in fundamentals.items():
                     if field in FUNDAMENTAL_FIELDS:
                         enriched_row[field] = value
@@ -59,6 +91,7 @@ def screen_listing(
             failures += 1
             if failures <= 3:
                 warnings.append(f"{stock.display_name} 스크리닝 실패: {exc}")
+        _emit_progress(progress_callback, done, total, len(matched_rows), failures, row, started_at)
 
     if failures > 3:
         warnings.append(f"추가 실패 종목 {failures - 3}건은 로그를 생략했습니다.")
@@ -68,7 +101,28 @@ def screen_listing(
     else:
         # Preserve the original listing schema so the UI can safely render a valid 0-row result.
         result = working.head(0).copy().reset_index(drop=True)
+    if stopped:
+        warnings.append("사용자 요청으로 스크리닝을 중지했습니다. 현재까지 매칭된 결과만 표시합니다.")
     return result, warnings
+
+
+def _emit_progress(progress_callback, done: int, total: int, matched: int, failures: int, row: pd.Series, started_at: float, stopped: bool = False) -> None:
+    if progress_callback is None:
+        return
+    from market_viewer.analysis.filter_models import ScreeningProgress
+
+    progress_callback(
+        ScreeningProgress(
+            done=done,
+            total=total,
+            matched=matched,
+            failures=failures,
+            current_code=str(row.get("Code", "")),
+            current_name=str(row.get("Name", "")),
+            elapsed_seconds=time.monotonic() - started_at,
+            stopped=stopped,
+        )
+    )
 
 
 def _matches_conditions(

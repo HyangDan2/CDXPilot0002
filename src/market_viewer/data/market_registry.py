@@ -6,21 +6,21 @@ from market_viewer.models import MarketDefinition
 MARKET_REGISTRY: dict[str, MarketDefinition] = {
     "KOSPI": MarketDefinition(
         id="KOSPI",
-        label="KOSPI",
+        label="KOSPI (코스피)",
         country="KR",
         currency="KRW",
         listing_sources=("KOSPI",),
     ),
     "KOSDAQ": MarketDefinition(
         id="KOSDAQ",
-        label="KOSDAQ",
+        label="KOSDAQ (코스닥)",
         country="KR",
         currency="KRW",
         listing_sources=("KOSDAQ",),
     ),
     "KRX_ALL": MarketDefinition(
         id="KRX_ALL",
-        label="KRX ALL",
+        label="KRX ALL (코스피+코스닥)",
         country="KR",
         currency="KRW",
         listing_sources=("KOSPI", "KOSDAQ"),

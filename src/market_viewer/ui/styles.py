@@ -69,7 +69,7 @@ def build_app_stylesheet() -> str:
         background: #ffffff;
     }
 
-    QLineEdit, QPlainTextEdit, QTextBrowser, QComboBox, QTableWidget {
+    QLineEdit, QPlainTextEdit, QTextBrowser, QComboBox, QTableWidget, QTableView {
         background: #ffffff;
         border: 1px solid #d7dee8;
         border-radius: 10px;
@@ -112,7 +112,7 @@ def build_app_stylesheet() -> str:
         color: #eef2f7;
     }
 
-    QTableWidget {
+    QTableWidget, QTableView {
         gridline-color: #edf1f7;
         alternate-background-color: #f8fafc;
         selection-background-color: #dbe8ff;

@@ -18,9 +18,17 @@ def execute_screening(
     market_scope: str,
     parsed_filter: ParsedFilter,
     listing: pd.DataFrame | None = None,
+    progress_callback=None,
+    cancel_checker=None,
 ) -> tuple[pd.DataFrame, list[str]]:
     source_listing = listing.copy() if listing is not None and not listing.empty else market_service.load_listing(market_scope)
-    return screen_listing(market_service, source_listing, parsed_filter)
+    return screen_listing(
+        market_service,
+        source_listing,
+        parsed_filter,
+        progress_callback=progress_callback,
+        cancel_checker=cancel_checker,
+    )
 
 
 def build_resolved_filter_markdown(parsed: ParsedFilter, market_scope: str) -> str:
@@ -33,7 +41,11 @@ def build_resolved_filter_markdown(parsed: ParsedFilter, market_scope: str) -> s
 
     markets = ", ".join(parsed.markets) if parsed.markets else market_scope
     conditions = parsed.conditions or []
-    condition_lines = "\n".join(f"- {condition.label}" for condition in conditions) if conditions else "- 해석된 조건 없음"
+    custom_conditions = parsed.custom_conditions or []
+    if custom_conditions:
+        condition_lines = "\n".join(f"- {condition.label}" for condition in custom_conditions if condition.active)
+    else:
+        condition_lines = "\n".join(f"- {condition.label}" for condition in conditions) if conditions else "- 해석된 조건 없음"
     warnings = "\n".join(f"- {warning}" for warning in parsed.warnings) if parsed.warnings else "- 없음"
     return f"""## 해석 결과
 

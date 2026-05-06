@@ -5,9 +5,10 @@ PySide6 기반으로 Kiwoom REST API에서 `KOSPI`, `KOSDAQ` 종목을 조회하
 ## Features
 
 - Kiwoom REST API 기반 KOSPI / KOSDAQ / KRX ALL 시장 목록 로딩
+- DataFrame-backed `QTableView` 종목 목록으로 KRX ALL 같은 대량 목록 렌더링 지연 최소화
 - 종목명/코드 검색 및 Enter 기반 차트 갱신
 - 메뉴바 기반 스크리너 조건 설정 / 적용 / 초기화
-- 가격/거래량/이동평균/재무 스냅샷 기반 하드코딩 스크리닝
+- VSPilot0023 스타일 조건식 테이블 기반 가격/거래량/이동평균/재무 스냅샷 스크리닝
 - 키움 `ka10001` 기본정보 기반 PER / PBR / ROE / EPS / BPS / 매출액 / 영업이익 / 순이익 표시
 - 일봉 OHLCV 조회
 - 별도 차트 창의 캔들스틱 차트 + 종가 선 그래프
@@ -46,6 +47,7 @@ PYTHONPATH=src python -m market_viewer.main
 - `PySide6` / `shiboken6`는 2026-05-01 기준 PyPI 최신 릴리스인 `6.11.0`에 맞춰 고정했습니다.
 - 현재 로컬 런타임이 다른 버전이면, `requirements.txt`를 바꿔도 실제 실행 환경은 자동으로 바뀌지 않으므로 위 재설치 명령으로 맞춰야 합니다.
 - worker는 plain Python 데이터만 계산하고, 모든 Qt UI와 차트 상태 갱신은 메인 GUI 스레드에서만 수행합니다.
+- 종목 목록 UI는 `QTableWidgetItem` 대량 생성 대신 `QAbstractTableModel`이 화면에 필요한 셀만 제공하는 구조입니다.
 - 차트는 QtCharts 대신 `QWidget.paintEvent()` 기반 QPainter 렌더러로 직접 그립니다.
 - 차트 갱신은 plain Python OHLCV 데이터를 위젯 상태로 교체한 뒤 `update()`로 repaint합니다.
 - X축은 실제 달력 간격 대신 `거래일 인덱스` 기준으로 압축해 렌더링하고, 축 라벨만 실제 날짜 문자열로 표시합니다.
@@ -96,8 +98,12 @@ kiwoom:
 
 ## Screening Conditions
 
-- `Screening > 조건 설정`에서 정배열, 역배열, MA 크로스, MA224 상단, 거래량 비율, 60일 신고가, PER/PBR/ROE, 영업이익/순이익 조건을 조합합니다.
+- `Screening > 조건 설정`에서 조건 행 테이블을 편집합니다.
+- 조건 행은 사용 여부, 조건명, `AND/OR`, `MA 정배열`, `MA 비교`, PER/PBR/ROE/EPS/BPS, 매출액/영업이익/순이익, 시가총액/외인비율, 거래량/거래량MA20/거래량배율을 지원합니다.
+- 지표 칸은 `<5`, `>10`, `>=0`, `<=100000`, `>2,<10` 형식을 지원합니다.
 - `Screening > 조건 적용`으로 현재 시장 목록에 적용합니다.
+- 왼쪽 패널에는 `처리/전체`, 매칭 수, 실패 수, 진행률, 경과 시간, 예상 남은 시간이 표시됩니다.
+- `Stop` 버튼으로 현재 종목 처리 후 스크리닝을 중지하고, 지금까지 매칭된 결과를 표시합니다.
 - `Screening > 스크리너 초기화`로 전체 목록으로 되돌립니다.
 
 ## LLM Notes

@@ -18,3 +18,19 @@ kiwoom:
   appkey: ""
   secretkey: ""
   token_cache_enabled: true
+screening:
+  custom_conditions:
+    - name: "bullish_value"
+      enabled: true
+      operand: "AND"
+      ma_order: [5, 20, 60]
+      ma_above: []
+      metrics:
+        - metric: "PER"
+          op: "<"
+          value: 5.0
+        - metric: "PBR"
+          op: "<"
+          value: 0.5
+  active_conditions:
+    - "bullish_value"

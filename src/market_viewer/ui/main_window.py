@@ -5,13 +5,16 @@ from PySide6.QtCore import QThreadPool, Qt
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import QFileDialog, QMainWindow, QMessageBox, QSplitter, QStatusBar
 
+from market_viewer.analysis.condition_parser import summarize_conditions
 from market_viewer.analysis.filter_models import ParsedFilter
 from market_viewer.analysis.indicators import add_indicators
 from market_viewer.config.app_config_store import (
     load_kiwoom_config,
     load_llm_config,
+    load_screening_conditions,
     load_telegram_config,
     save_app_configs,
+    save_screening_conditions,
 )
 from market_viewer.config.session_store import load_session, save_session
 from market_viewer.data.market_registry import list_market_scopes
@@ -60,12 +63,16 @@ class MainWindow(QMainWindow):
         self.current_price_frame: pd.DataFrame | None = None
         self.current_fundamental_snapshot: FundamentalSnapshot | None = None
         self.current_filter = ParsedFilter(original_prompt="", normalized_prompt="")
+        self.screening_conditions = load_screening_conditions()
         self.session_path: str | None = None
         self._pending_restore: AppSessionState | None = None
         self._restore_screen_pending = False
         self._prompt_layer_actions: dict[str, QAction] = {}
         self._request_gate = RequestGate()
         self._is_closing = False
+        self._screen_cancel_requested = False
+        self._active_workers: set[Worker] = set()
+        self._listing_loading = False
 
         self.setWindowTitle("Multi-Market Screener")
         self.resize(1180, 840)
@@ -73,6 +80,7 @@ class MainWindow(QMainWindow):
         self._create_actions()
         self._create_menus()
         self._sync_prompt_layer_actions()
+        self._set_current_screening_conditions(self.screening_conditions, apply_to_panel=True)
         self._refresh_workspace_context()
         self._load_listing(self.session_state.market_scope)
 
@@ -100,6 +108,7 @@ class MainWindow(QMainWindow):
         self.stock_panel.refresh_requested.connect(self._refresh_current_scope)
         self.stock_panel.stock_activated.connect(self._load_price_history)
         self.stock_panel.search_failed.connect(lambda message: self.statusBar().showMessage(message, 4000))
+        self.stock_panel.stop_screen_requested.connect(self._stop_screening)
 
         self.analysis_panel.analyze_requested.connect(self._run_llm_analysis)
         self.analysis_panel.clear_requested.connect(lambda: self.analysis_panel.set_result_markdown(""))
@@ -352,12 +361,23 @@ class MainWindow(QMainWindow):
             self.addAction(action)
         return action
 
-    def _run_worker(self, fn, task_name: str, on_success, on_failure=None) -> None:
-        worker = Worker(fn, task_name)
+    def _run_worker(self, fn, task_name: str, on_success, on_failure=None, on_progress=None, accepts_progress: bool = False) -> None:
+        worker = Worker(fn, task_name, accepts_progress=accepts_progress)
+        self._active_workers.add(worker)
         # Worker threads must emit plain Python data only. All Qt UI and chart
         # mutations are funneled back to the GUI thread through queued delivery.
-        worker.signals.finished.connect(on_success, Qt.ConnectionType.QueuedConnection)
-        worker.signals.failed.connect(on_failure or self._show_error, Qt.ConnectionType.QueuedConnection)
+        def finish_and_cleanup(task: WorkerTask) -> None:
+            self._active_workers.discard(worker)
+            on_success(task)
+
+        def fail_and_cleanup(message: str) -> None:
+            self._active_workers.discard(worker)
+            (on_failure or self._show_error)(message)
+
+        worker.signals.finished.connect(finish_and_cleanup, Qt.ConnectionType.QueuedConnection)
+        worker.signals.failed.connect(fail_and_cleanup, Qt.ConnectionType.QueuedConnection)
+        if on_progress is not None:
+            worker.signals.progress.connect(on_progress, Qt.ConnectionType.QueuedConnection)
         self.thread_pool.start(worker)
 
     def _run_scoped_worker(
@@ -369,13 +389,17 @@ class MainWindow(QMainWindow):
         on_success,
         status_message: str | None = None,
         on_failure=None,
+        on_progress=None,
         modal_error: bool = False,
+        accepts_progress: bool = False,
     ) -> None:
         request_id = self._request_gate.begin(channel)
         if status_message:
             self.statusBar().showMessage(status_message)
 
-        def wrapped_fn():
+        def wrapped_fn(progress_emit=None):
+            if accepts_progress:
+                return request_id, fn(progress_emit)
             return request_id, fn()
 
         def wrapped_success(task: WorkerTask) -> None:
@@ -402,7 +426,20 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 self._handle_background_error(f"{task_name} 실패 처리 중 추가 오류: {exc}", modal=False)
 
-        self._run_worker(wrapped_fn, task_name, wrapped_success, wrapped_failure)
+        def wrapped_progress(payload: object) -> None:
+            if self._is_closing or not self._request_gate.is_current(channel, request_id):
+                return
+            if on_progress is not None:
+                on_progress(payload)
+
+        self._run_worker(
+            wrapped_fn,
+            task_name,
+            wrapped_success,
+            wrapped_failure,
+            on_progress=wrapped_progress if on_progress is not None else None,
+            accepts_progress=accepts_progress,
+        )
 
     def _persist_app_configs(self) -> None:
         save_app_configs(self.session_state.llm_config, self.telegram_config, self.kiwoom_config)
@@ -465,28 +502,69 @@ class MainWindow(QMainWindow):
         self._load_listing(self.stock_panel.current_market_scope())
 
     def _load_listing(self, market_scope: str) -> None:
+        if self._listing_loading:
+            self.statusBar().showMessage("이미 종목 목록을 불러오는 중입니다.", 3000)
+            return
         if not self.kiwoom_config.connection_ready:
             self._load_listing_into_table(pd.DataFrame())
             self.statusBar().showMessage("Kiwoom REST 설정 후 시장 새로고침을 실행하세요.", 6000)
             self._refresh_workspace_context()
             return
+        self._set_listing_loading(True)
         self._run_scoped_worker(
             channel=self.CHANNEL_LISTING,
             task_name="listing",
             status_message=f"{market_scope} 종목 목록을 불러오는 중입니다...",
-            fn=lambda: (market_scope, self.market_service.load_listing(market_scope), []),
+            accepts_progress=True,
+            fn=lambda progress_emit: (
+                market_scope,
+                *self.market_service.load_listing_with_warnings(market_scope, progress_callback=progress_emit),
+            ),
             on_success=self._on_listing_loaded,
+            on_failure=self._on_listing_failed,
+            on_progress=self._on_listing_progress,
         )
 
     def _on_listing_loaded(self, task: WorkerTask) -> None:
+        self._set_listing_loading(False)
         market_scope, frame, warnings = task.payload
         self._load_listing_into_table(frame)
         current_scope = self.stock_panel.current_market_scope()
-        self.statusBar().showMessage(f"{current_scope} 종목 목록을 불러왔습니다.", 4000)
+        self.statusBar().showMessage(f"{current_scope} 종목 {len(frame)}개를 불러왔습니다.", 4000)
         if warnings:
             self.statusBar().showMessage(" | ".join(warnings[:2]), 5000)
+            self.analysis_panel.set_result_markdown("## 시장 목록 로딩 경고\n\n- " + "\n- ".join(warnings))
         self._refresh_workspace_context()
         self._restore_pending_selection_after_listing()
+
+    def _on_listing_failed(self, message: str) -> None:
+        self._set_listing_loading(False)
+        self._handle_background_error(message)
+
+    def _on_listing_progress(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        source = payload.get("source", "")
+        index = payload.get("index", 0)
+        total = payload.get("total", 0)
+        stage = payload.get("stage", "")
+        count = payload.get("count", 0)
+        if stage == "start":
+            message = f"{source} 종목 목록을 불러오는 중입니다... ({index}/{total})"
+        elif stage == "done":
+            message = f"{source} 종목 {count}개 완료 ({index}/{total})"
+        elif stage == "failed":
+            message = f"{source} 종목 목록 로딩 실패 ({index}/{total})"
+        elif stage == "empty":
+            message = f"{source} 종목 목록이 비어 있습니다 ({index}/{total})"
+        else:
+            message = f"{source} 종목 목록 처리 중... ({index}/{total})"
+        self.statusBar().showMessage(message)
+
+    def _set_listing_loading(self, loading: bool) -> None:
+        self._listing_loading = loading
+        self.stock_panel.set_listing_loading(loading)
+        self.refresh_market_action.setEnabled(not loading)
 
     def _clear_screen(self) -> None:
         self.current_filter = ParsedFilter(original_prompt="", normalized_prompt="")
@@ -494,19 +572,34 @@ class MainWindow(QMainWindow):
         self.stock_panel.set_filter_prompt("")
         self.stock_panel.set_resolved_preview("조건이 비어 있습니다. 현재 시장 범위 전체를 표시합니다.")
         self.stock_panel.set_apply_enabled(True)
+        self.stock_panel.set_screening_progress("스크리닝 대기")
         market_scope = self.stock_panel.current_market_scope()
         self._refresh_workspace_context()
         self.statusBar().showMessage("스크리너 조건을 초기화하고 종목 목록을 다시 불러오는 중입니다...")
         self._load_listing(market_scope)
 
     def _open_screening_dialog(self) -> None:
-        dialog = ScreeningDialog(self.stock_panel.filter_prompt(), self)
+        dialog = ScreeningDialog(self.screening_conditions, self)
         if not dialog.exec():
             return
-        prompt = dialog.screening_prompt()
-        self.stock_panel.set_filter_prompt(prompt)
-        self._resolve_screen_prompt(prompt)
+        self.screening_conditions = dialog.conditions()
+        save_screening_conditions(self.screening_conditions)
+        self._set_current_screening_conditions(self.screening_conditions, apply_to_panel=True)
         self._apply_resolved_screen()
+
+    def _set_current_screening_conditions(self, conditions, apply_to_panel: bool = False) -> None:
+        market_scope = self.stock_panel.current_market_scope() or self.session_state.market_scope
+        summary = summarize_conditions(conditions)
+        self.current_filter = ParsedFilter(
+            original_prompt=summary,
+            normalized_prompt=summary,
+            markets=[] if market_scope == "KRX_ALL" else [market_scope],
+            custom_conditions=conditions,
+            resolution_source="custom",
+        )
+        if apply_to_panel:
+            self.stock_panel.set_filter_prompt(summary)
+            self.stock_panel.set_resolved_preview(build_resolved_filter_markdown(self.current_filter, market_scope))
 
     def _resolve_screen_prompt(self, prompt: str) -> None:
         market_scope = self.stock_panel.current_market_scope()
@@ -518,30 +611,61 @@ class MainWindow(QMainWindow):
 
     def _apply_resolved_screen(self) -> None:
         prompt = self.stock_panel.filter_prompt()
-        if prompt != self.current_filter.original_prompt:
+        if self.current_filter.custom_conditions:
+            self._set_current_screening_conditions(self.screening_conditions, apply_to_panel=True)
+        elif prompt != self.current_filter.original_prompt:
             self._resolve_screen_prompt(prompt)
 
         market_scope = self.stock_panel.current_market_scope()
         parsed = self.current_filter
+        self._screen_cancel_requested = False
+        self.stock_panel.set_screening_running(True)
+        self.stock_panel.set_screening_progress("0 / 0 처리 중 · 매칭 0 · 실패 0 · 0.0%")
         self._run_scoped_worker(
             channel=self.CHANNEL_SCREEN,
             task_name="screen",
             status_message="조건 스크리닝을 실행하는 중입니다...",
-            fn=lambda: (
+            accepts_progress=True,
+            fn=lambda progress_emit: (
                 parsed,
                 execute_screening(
                     market_service=self.market_service,
                     market_scope=market_scope,
                     parsed_filter=parsed,
                     listing=self.current_listing,
+                    progress_callback=progress_emit,
+                    cancel_checker=lambda: self._screen_cancel_requested,
                 ),
             ),
             on_success=self._on_screen_loaded,
+            on_progress=self._on_screen_progress,
+            on_failure=self._on_screen_failed,
         )
+
+    def _stop_screening(self) -> None:
+        self._screen_cancel_requested = True
+        self.stock_panel.set_screening_progress("중지 요청됨 · 현재 종목 처리 후 멈춥니다.")
+        self.statusBar().showMessage("스크리닝 중지를 요청했습니다.", 4000)
+
+    def _on_screen_progress(self, progress) -> None:
+        remaining = progress.remaining_seconds
+        remaining_text = "--:--" if remaining is None else self._format_duration(remaining)
+        text = (
+            f"{progress.done} / {progress.total} 처리 · 매칭 {progress.matched} · 실패 {progress.failures} · "
+            f"{progress.percent:.1f}% · 경과 {self._format_duration(progress.elapsed_seconds)} · 남은 {remaining_text}"
+        )
+        if progress.current_code:
+            text += f" · {progress.current_name}({progress.current_code})"
+        if progress.stopped:
+            text = "중지됨 · " + text
+        self.stock_panel.set_screening_progress(text)
+        self.statusBar().showMessage(text)
 
     def _on_screen_loaded(self, task: WorkerTask) -> None:
         parsed, payload = task.payload
         frame, warnings = payload
+        self.stock_panel.set_screening_running(False)
+        self._screen_cancel_requested = False
         self._clear_active_stock_context()
         self.current_listing = frame
         self.stock_panel.set_listing(frame, auto_activate=False)
@@ -557,6 +681,21 @@ class MainWindow(QMainWindow):
         if self._pending_restore is not None and self._pending_restore.selected_stock:
             self.stock_panel.select_stock(self._pending_restore.selected_stock)
             self._load_price_history(self._pending_restore.selected_stock)
+
+    def _on_screen_failed(self, message: str) -> None:
+        self.stock_panel.set_screening_running(False)
+        self._screen_cancel_requested = False
+        self.stock_panel.set_screening_progress(f"실패 · {message}")
+        self._handle_background_error(message)
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        seconds = max(0, int(seconds))
+        minutes, sec = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours:02d}:{minutes:02d}:{sec:02d}"
+        return f"{minutes:02d}:{sec:02d}"
 
     def _load_price_history(self, stock: StockReference) -> None:
         self.current_stock = stock
@@ -843,4 +982,5 @@ class MainWindow(QMainWindow):
             self.chart_window.prepare_for_shutdown()
         self.thread_pool.clear()
         self.thread_pool.waitForDone(2000)
+        self._active_workers.clear()
         super().closeEvent(event)

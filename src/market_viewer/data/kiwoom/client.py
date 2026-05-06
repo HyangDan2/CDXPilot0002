@@ -19,7 +19,7 @@ class KiwoomResponse:
 
 
 class KiwoomRestClient:
-    def __init__(self, config: KiwoomConfig, timeout_seconds: int = 30) -> None:
+    def __init__(self, config: KiwoomConfig, timeout_seconds: int = 12) -> None:
         self._config = config
         self._timeout_seconds = timeout_seconds
         self._token = ""

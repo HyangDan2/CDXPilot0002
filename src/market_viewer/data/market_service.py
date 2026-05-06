@@ -31,12 +31,40 @@ class MarketService:
         return self._provider.test_connection()
 
     def load_listing(self, market_scope: str) -> pd.DataFrame:
-        frames = [self._load_source_listing(source) for source in get_listing_sources(market_scope)]
+        frame, warnings = self.load_listing_with_warnings(market_scope)
+        if frame.empty and warnings:
+            raise ValueError(" / ".join(warnings))
+        return frame
+
+    def load_listing_with_warnings(self, market_scope: str, progress_callback=None) -> tuple[pd.DataFrame, list[str]]:
+        frames: list[pd.DataFrame] = []
+        warnings: list[str] = []
+        sources = get_listing_sources(market_scope)
+        for index, source in enumerate(sources, start=1):
+            if progress_callback is not None:
+                progress_callback({"stage": "start", "source": source, "index": index, "total": len(sources), "count": 0})
+            try:
+                source_frame = self._load_source_listing(source)
+            except Exception as exc:
+                warnings.append(f"{source} 종목 목록 로딩 실패: {exc}")
+                if progress_callback is not None:
+                    progress_callback({"stage": "failed", "source": source, "index": index, "total": len(sources), "count": 0})
+                continue
+            if source_frame.empty:
+                warnings.append(f"{source} 종목 목록이 비어 있습니다.")
+                if progress_callback is not None:
+                    progress_callback({"stage": "empty", "source": source, "index": index, "total": len(sources), "count": 0})
+                continue
+            frames.append(source_frame)
+            if progress_callback is not None:
+                progress_callback({"stage": "done", "source": source, "index": index, "total": len(sources), "count": len(source_frame)})
         if not frames:
-            return pd.DataFrame(columns=["Code", "Name", "Market", "Country", "Currency", "Close", "ChangePct", "Volume"])
+            empty = pd.DataFrame(columns=["Code", "Name", "Market", "Country", "Currency", "Close", "ChangePct", "Volume"])
+            return empty, warnings
         listing = pd.concat(frames, ignore_index=True)
-        listing = listing.sort_values(["Market", "Name"]).reset_index(drop=True)
-        return listing
+        listing = listing.drop_duplicates(subset=["Market", "Code"], keep="first")
+        listing = listing.sort_values(["Market", "Name"], kind="stable").reset_index(drop=True)
+        return listing, warnings
 
     def build_stock_reference(self, row: pd.Series) -> StockReference:
         return StockReference(

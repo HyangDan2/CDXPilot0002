@@ -50,8 +50,19 @@ def parse_absolute_number(value: object) -> float | None:
 def normalize_listing_rows(rows: list[dict], market_id: str) -> pd.DataFrame:
     normalized: list[dict] = []
     for row in rows:
-        code = clean_code(row.get("code"))
-        name = str(row.get("name") or "").strip()
+        code = clean_code(
+            row.get("code")
+            or row.get("stk_cd")
+            or row.get("stkcd")
+            or row.get("종목코드")
+        )
+        name = str(
+            row.get("name")
+            or row.get("stk_nm")
+            or row.get("stknm")
+            or row.get("종목명")
+            or ""
+        ).strip()
         if not code or not name:
             continue
         normalized.append(
@@ -61,9 +72,9 @@ def normalize_listing_rows(rows: list[dict], market_id: str) -> pd.DataFrame:
                 "Market": market_id,
                 "Country": "KR",
                 "Currency": "KRW",
-                "Close": parse_absolute_number(row.get("lastPrice")),
+                "Close": parse_absolute_number(row.get("lastPrice") or row.get("cur_prc") or row.get("현재가")),
                 "ChangePct": pd.NA,
-                "Volume": pd.NA,
+                "Volume": parse_absolute_number(row.get("trde_qty") or row.get("거래량")),
                 "State": str(row.get("state") or "").strip(),
                 "Sector": str(row.get("upName") or "").strip(),
                 "MarketCode": str(row.get("marketCode") or "").strip(),

@@ -4,6 +4,12 @@ from pathlib import Path
 
 import yaml
 
+from market_viewer.analysis.condition_parser import (
+    default_screening_conditions,
+    dump_screening_conditions,
+    load_screening_conditions as parse_screening_conditions,
+)
+from market_viewer.analysis.filter_models import ScreeningCondition
 from market_viewer.models import KiwoomConfig, LLMConfig, TelegramConfig
 
 
@@ -69,6 +75,13 @@ def load_kiwoom_config() -> KiwoomConfig:
     )
 
 
+def load_screening_conditions() -> list[ScreeningCondition]:
+    raw = _load_raw_config()
+    screening_raw = raw.get("screening", {})
+    conditions = parse_screening_conditions(screening_raw.get("custom_conditions"))
+    return conditions or default_screening_conditions()
+
+
 def _save_raw_config(payload: dict) -> None:
     path = app_config_path()
     path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
@@ -99,6 +112,14 @@ def save_telegram_config(config: TelegramConfig) -> None:
 def save_kiwoom_config(config: KiwoomConfig) -> None:
     raw = _load_raw_config()
     raw["kiwoom"] = _kiwoom_payload(config)
+    _save_raw_config(raw)
+
+
+def save_screening_conditions(conditions: list[ScreeningCondition]) -> None:
+    raw = _load_raw_config()
+    raw.setdefault("screening", {})
+    raw["screening"]["custom_conditions"] = dump_screening_conditions(conditions)
+    raw["screening"]["active_conditions"] = [condition.name for condition in conditions if condition.active]
     _save_raw_config(raw)
 
 
