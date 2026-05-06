@@ -11,10 +11,12 @@ from market_viewer.analysis.indicators import add_indicators
 from market_viewer.config.app_config_store import (
     load_kiwoom_config,
     load_llm_config,
+    load_screening_report_config,
     load_screening_conditions,
     load_telegram_config,
     save_app_configs,
     save_screening_conditions,
+    save_screening_report_config,
 )
 from market_viewer.config.session_store import load_session, save_session
 from market_viewer.data.market_registry import list_market_scopes
@@ -29,6 +31,10 @@ from market_viewer.services.screening_service import (
     build_resolved_filter_markdown,
     execute_screening,
     parse_local_screening_prompt,
+)
+from market_viewer.services.screening_report_service import (
+    ScreeningReportSummary,
+    generate_screening_llm_reports,
 )
 from market_viewer.telegram.client import send_telegram_report
 from market_viewer.ui.analysis_panel import AnalysisPanel
@@ -49,6 +55,7 @@ class MainWindow(QMainWindow):
     CHANNEL_LLM_TEST = "llm_test"
     CHANNEL_LLM_ANALYSIS = "llm_analysis"
     CHANNEL_TELEGRAM = "telegram"
+    CHANNEL_SCREEN_REPORT = "screen_report"
 
     def __init__(self) -> None:
         super().__init__()
@@ -58,7 +65,10 @@ class MainWindow(QMainWindow):
         self.session_state = AppSessionState()
         self.session_state.llm_config = load_llm_config()
         self.telegram_config = load_telegram_config()
+        self.screening_report_config = load_screening_report_config()
         self.current_listing = pd.DataFrame()
+        self.last_screening_listing = pd.DataFrame()
+        self.last_screening_filter = ParsedFilter(original_prompt="", normalized_prompt="")
         self.current_stock: StockReference | None = None
         self.current_price_frame: pd.DataFrame | None = None
         self.current_fundamental_snapshot: FundamentalSnapshot | None = None
@@ -71,6 +81,8 @@ class MainWindow(QMainWindow):
         self._request_gate = RequestGate()
         self._is_closing = False
         self._screen_cancel_requested = False
+        self._report_cancel_requested = False
+        self._report_running = False
         self._active_workers: set[Worker] = set()
         self._listing_loading = False
 
@@ -188,6 +200,14 @@ class MainWindow(QMainWindow):
             shortcut="Escape",
             register_shortcut=True,
         )
+        self.generate_screen_reports_action = self._make_action(
+            "스크리닝 결과 LLM 보고서 생성/발송",
+            self._generate_screening_reports,
+        )
+        self.auto_screen_reports_action = QAction("스크리닝 완료 후 LLM 보고서 자동 생성/발송", self)
+        self.auto_screen_reports_action.setCheckable(True)
+        self.auto_screen_reports_action.setChecked(self.screening_report_config.auto_llm_reports)
+        self.auto_screen_reports_action.toggled.connect(self._toggle_auto_screening_reports)
 
         self.next_stock_action = self._make_action(
             "다음 종목",
@@ -299,6 +319,9 @@ class MainWindow(QMainWindow):
         screening_menu.addAction(self.screen_settings_action)
         screening_menu.addAction(self.apply_screen_action)
         screening_menu.addAction(self.clear_screen_action)
+        screening_menu.addSeparator()
+        screening_menu.addAction(self.generate_screen_reports_action)
+        screening_menu.addAction(self.auto_screen_reports_action)
 
         chart_menu = menu_bar.addMenu("Chart")
         chart_menu.addAction(self.focus_chart_action)
@@ -643,6 +666,11 @@ class MainWindow(QMainWindow):
         )
 
     def _stop_screening(self) -> None:
+        if self._report_running:
+            self._report_cancel_requested = True
+            self.stock_panel.set_screening_progress("보고서 중지 요청됨 · 현재 종목 처리 후 멈춥니다.")
+            self.statusBar().showMessage("LLM 보고서 생성을 중지 요청했습니다.", 4000)
+            return
         self._screen_cancel_requested = True
         self.stock_panel.set_screening_progress("중지 요청됨 · 현재 종목 처리 후 멈춥니다.")
         self.statusBar().showMessage("스크리닝 중지를 요청했습니다.", 4000)
@@ -668,6 +696,8 @@ class MainWindow(QMainWindow):
         self._screen_cancel_requested = False
         self._clear_active_stock_context()
         self.current_listing = frame
+        self.last_screening_listing = frame.copy()
+        self.last_screening_filter = parsed
         self.stock_panel.set_listing(frame, auto_activate=False)
         warning_text = "\n".join(warnings[:3])
         status = f"{len(frame)}개 종목이 조건에 일치했습니다."
@@ -682,10 +712,110 @@ class MainWindow(QMainWindow):
             self.stock_panel.select_stock(self._pending_restore.selected_stock)
             self._load_price_history(self._pending_restore.selected_stock)
 
+        stopped = any("중지" in warning for warning in warnings)
+        if self.screening_report_config.auto_llm_reports and not stopped and not frame.empty:
+            self._generate_screening_reports()
+
     def _on_screen_failed(self, message: str) -> None:
         self.stock_panel.set_screening_running(False)
         self._screen_cancel_requested = False
         self.stock_panel.set_screening_progress(f"실패 · {message}")
+        self._handle_background_error(message)
+
+    def _toggle_auto_screening_reports(self, enabled: bool) -> None:
+        if enabled and not self._screen_report_ready(show_error=True):
+            self.auto_screen_reports_action.blockSignals(True)
+            self.auto_screen_reports_action.setChecked(False)
+            self.auto_screen_reports_action.blockSignals(False)
+            self.screening_report_config.auto_llm_reports = False
+            save_screening_report_config(self.screening_report_config)
+            return
+        self.screening_report_config.auto_llm_reports = enabled
+        save_screening_report_config(self.screening_report_config)
+        message = "자동 LLM 보고서 생성/발송을 켰습니다." if enabled else "자동 LLM 보고서 생성/발송을 껐습니다."
+        self.statusBar().showMessage(message, 4000)
+
+    def _screen_report_ready(self, *, show_error: bool = False) -> bool:
+        if not self.session_state.llm_config.connection_ready:
+            if show_error:
+                self._show_error("LLM 연결 설정을 먼저 입력하세요.")
+            return False
+        if self.screening_report_config.telegram_after_llm_reports and not self.telegram_config.connection_ready:
+            if show_error:
+                self._show_error("Telegram Bot Token과 Chat ID를 먼저 설정하세요.")
+            return False
+        return True
+
+    def _generate_screening_reports(self) -> None:
+        if self._report_running:
+            self.statusBar().showMessage("이미 LLM 보고서를 생성/전송하는 중입니다.", 4000)
+            return
+        if self.last_screening_listing.empty:
+            self._show_error("LLM 보고서를 생성할 스크리닝 결과가 없습니다. 조건 스크리닝을 먼저 실행하세요.")
+            return
+        if not self._screen_report_ready(show_error=True):
+            return
+        self._report_cancel_requested = False
+        self._report_running = True
+        self.stock_panel.set_screening_running(True)
+        self.stock_panel.set_screening_progress("LLM 보고서 생성/전송 0 / 0 · 저장 0 · 전송 0 · 실패 0")
+        self._run_scoped_worker(
+            channel=self.CHANNEL_SCREEN_REPORT,
+            task_name="screen_report",
+            status_message="스크리닝 결과 LLM 보고서를 생성/전송하는 중입니다...",
+            accepts_progress=True,
+            fn=lambda progress_emit: generate_screening_llm_reports(
+                market_service=self.market_service,
+                llm_config=self.session_state.llm_config,
+                telegram_config=self.telegram_config,
+                report_config=self.screening_report_config,
+                matched_listing=self.last_screening_listing,
+                parsed_filter=self.last_screening_filter,
+                progress_callback=progress_emit,
+                cancel_checker=lambda: self._report_cancel_requested,
+            ),
+            on_success=self._on_screening_reports_done,
+            on_progress=self._on_screening_report_progress,
+            on_failure=self._on_screening_reports_failed,
+        )
+
+    def _on_screening_report_progress(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        done = int(payload.get("done", 0))
+        total = int(payload.get("total", 0))
+        saved = int(payload.get("saved", 0))
+        telegram_sent = int(payload.get("telegram_sent", 0))
+        failures = int(payload.get("failures", 0))
+        current_name = str(payload.get("current_name", ""))
+        current_code = str(payload.get("current_code", ""))
+        stopped = bool(payload.get("stopped", False))
+        prefix = "보고서 중지됨 · " if stopped else "LLM 보고서 생성/전송 "
+        text = f"{prefix}{done} / {total} · 저장 {saved} · 전송 {telegram_sent} · 실패 {failures}"
+        if current_code:
+            text += f" · {current_name}({current_code})"
+        self.stock_panel.set_screening_progress(text)
+        self.statusBar().showMessage(text)
+
+    def _on_screening_reports_done(self, task: WorkerTask) -> None:
+        summary: ScreeningReportSummary = task.payload
+        self.stock_panel.set_screening_running(False)
+        self._report_cancel_requested = False
+        self._report_running = False
+        text = (
+            f"LLM 보고서 {summary.saved}개 저장, Telegram {summary.telegram_sent}개 전송, "
+            f"실패 {summary.failures}개"
+        )
+        if summary.stopped:
+            text = "중지됨 · " + text
+        self.stock_panel.set_screening_progress(text)
+        self.statusBar().showMessage(f"{text} · {summary.summary_path}", 7000)
+
+    def _on_screening_reports_failed(self, message: str) -> None:
+        self.stock_panel.set_screening_running(False)
+        self._report_cancel_requested = False
+        self._report_running = False
+        self.stock_panel.set_screening_progress(f"LLM 보고서 실패 · {message}")
         self._handle_background_error(message)
 
     @staticmethod

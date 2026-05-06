@@ -10,7 +10,7 @@ from market_viewer.analysis.condition_parser import (
     load_screening_conditions as parse_screening_conditions,
 )
 from market_viewer.analysis.filter_models import ScreeningCondition
-from market_viewer.models import KiwoomConfig, LLMConfig, TelegramConfig
+from market_viewer.models import KiwoomConfig, LLMConfig, ScreeningReportConfig, TelegramConfig
 
 
 def _as_bool(value: object, default: bool = False) -> bool:
@@ -82,6 +82,19 @@ def load_screening_conditions() -> list[ScreeningCondition]:
     return conditions or default_screening_conditions()
 
 
+def load_screening_report_config() -> ScreeningReportConfig:
+    raw = _load_raw_config()
+    screening_raw = raw.get("screening", {})
+    return ScreeningReportConfig(
+        auto_llm_reports=_as_bool(screening_raw.get("auto_llm_reports"), False),
+        telegram_after_llm_reports=_as_bool(screening_raw.get("telegram_after_llm_reports"), True),
+        report_output_dir=str(screening_raw.get("report_output_dir", "log")),
+        max_llm_report_stocks=max(1, int(screening_raw.get("max_llm_report_stocks", 30))),
+        send_summary_to_telegram=_as_bool(screening_raw.get("send_summary_to_telegram"), True),
+        telegram_send_as_text=_as_bool(screening_raw.get("telegram_send_as_text"), True),
+    )
+
+
 def _save_raw_config(payload: dict) -> None:
     path = app_config_path()
     path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
@@ -123,6 +136,13 @@ def save_screening_conditions(conditions: list[ScreeningCondition]) -> None:
     _save_raw_config(raw)
 
 
+def save_screening_report_config(config: ScreeningReportConfig) -> None:
+    raw = _load_raw_config()
+    raw.setdefault("screening", {})
+    raw["screening"].update(_screening_report_payload(config))
+    _save_raw_config(raw)
+
+
 def save_app_configs(
     llm_config: LLMConfig,
     telegram_config: TelegramConfig,
@@ -157,4 +177,15 @@ def _kiwoom_payload(config: KiwoomConfig) -> dict:
         "appkey": config.appkey,
         "secretkey": config.secretkey,
         "token_cache_enabled": config.token_cache_enabled,
+    }
+
+
+def _screening_report_payload(config: ScreeningReportConfig) -> dict:
+    return {
+        "auto_llm_reports": config.auto_llm_reports,
+        "telegram_after_llm_reports": config.telegram_after_llm_reports,
+        "report_output_dir": config.report_output_dir,
+        "max_llm_report_stocks": config.max_llm_report_stocks,
+        "send_summary_to_telegram": config.send_summary_to_telegram,
+        "telegram_send_as_text": config.telegram_send_as_text,
     }

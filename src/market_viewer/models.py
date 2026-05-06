@@ -50,6 +50,16 @@ class TelegramConfig:
 
 
 @dataclass(slots=True)
+class ScreeningReportConfig:
+    auto_llm_reports: bool = False
+    telegram_after_llm_reports: bool = True
+    report_output_dir: str = "log"
+    max_llm_report_stocks: int = 30
+    send_summary_to_telegram: bool = True
+    telegram_send_as_text: bool = True
+
+
+@dataclass(slots=True)
 class KiwoomConfig:
     enabled: bool = False
     mock: bool = False
