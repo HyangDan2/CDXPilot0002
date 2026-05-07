@@ -8,7 +8,11 @@
 - Separate chart window with candlestick and line views
 - Menu-bar screening condition table based on the VSPilot0023 custom condition format
 - Sequential stateless LLM report generation for completed screening results
+- Adaptive screening rate limit with 10 samples/second default speed and automatic slowdown
+- Queued LLM report generation at a configurable 5-minute interval
+- Optional in-app hourly screening scheduler
 - Per-stock user report and raw trace Markdown saved under `/log`
+- LLM stock report retention keeps the latest 100 user-facing reports and removes older raw pairs
 - Telegram text delivery for generated screening LLM reports
 - YAML session save/load
 
@@ -28,6 +32,8 @@
 - `config.example.yaml` keeps only format/default values.
 - Screening conditions save under `config.yaml > screening.custom_conditions`.
 - Screening report options save under `config.yaml > screening`.
+- Screening scan speed options save under `config.yaml > screening`.
+- Scheduled screening options save under `config.yaml > screening`.
 - `chart_panel.py` was replaced with a QtCharts-free QPainter renderer built on `QWidget.paintEvent()`.
 - Candlestick, line, moving averages, volume overlay, bottom date labels, hover tooltip, pan, zoom, reset, and range persistence now run without `QtCharts.framework`.
 - The chart X axis uses compressed trading-day indexing instead of real calendar spacing.
@@ -37,15 +43,32 @@
 
 - Manual trigger: `Screening > Generate/Send Screening LLM Reports`
 - Auto trigger: `Screening > Auto-generate/send LLM reports after screening completion`
+- Operations settings: `Screening > Report/Schedule Settings...`
 - Auto trigger is checkable and persists to `screening.auto_llm_reports`.
 - Auto trigger validation requires both LLM connection settings and Telegram settings.
-- Reports are generated sequentially, one stock at a time.
+- Report/schedule settings are edited through a dialog and persisted to `config.yaml > screening`.
+- Saving the settings dialog restarts the scheduled screening timer when scheduled screening is enabled.
+- Reports are queued and generated one stock at a time.
+- The first queued stock is processed immediately; the remaining queue is processed every configured interval.
 - Each stock report is stateless; previous stock reports are not reused as context.
 - The user-facing Markdown report is saved to `log/{timestamp}_{code}_{safe_name}.md`.
 - The raw trace is saved to `log/{timestamp}_{code}_{safe_name}_raw.md`.
 - Run summary is saved to `log/{timestamp}_summary.md`.
 - Telegram receives the report body as message text, not as a file attachment.
 - Long Telegram messages are split into chunks by the Telegram client.
+- User-facing stock report retention is enforced after report generation; older report/raw pairs are removed when the limit is exceeded.
+
+## Scheduled Screening And Rate Control
+
+- The screening loop uses `AdaptiveRateLimiter`.
+- Default scan speed is `10.0` samples/second.
+- Minimum scan speed is `1.0` sample/second.
+- Repeated timeout, 429, or 5xx style errors reduce the scan speed automatically.
+- Stable success streaks gradually recover speed toward the maximum.
+- Progress text includes current speed and an automatic slowdown marker.
+- Scheduled screening uses a `QTimer` while the app is open.
+- The default scheduled interval is 60 minutes.
+- Scheduled ticks are skipped when listing, screening, or queued report work is already active.
 
 ## Report Prompt Contract
 
@@ -79,6 +102,7 @@ The prompt instructs the LLM not to invent absent data and to mark missing field
 - `src/market_viewer/services/intelligence_service.py`
 - `src/market_viewer/services/llm_service.py`
 - `src/market_viewer/services/request_gate.py`
+- `src/market_viewer/services/rate_limiter.py`
 - `src/market_viewer/services/screening_report_service.py`
 - `src/market_viewer/services/screening_service.py`
 - `src/market_viewer/telegram/client.py`
@@ -105,7 +129,8 @@ The prompt instructs the LLM not to invent absent data and to mark missing field
 ## Remaining Risks
 
 - Repeated manual testing on resize, close, fast stock switching, and chart zoom/pan is still important because the chart renderer was replaced.
-- Screening LLM report generation can be slow for many matched stocks because it intentionally runs sequentially to avoid rate-limit pressure.
+- Screening LLM report generation can take a long wall-clock time because queued reports are intentionally spaced out to reduce timeout and rate-limit pressure.
+- The scheduler only runs while the desktop app is open.
 - Telegram delivery depends on network availability and Telegram Bot API limits.
 - Kiwoom `ka10001` provides a basic-information snapshot, not a full financial statement data model.
 - `MainWindow` still owns most application orchestration and would benefit from controller extraction later.
@@ -116,7 +141,8 @@ The prompt instructs the LLM not to invent absent data and to mark missing field
 2. Load `KOSDAQ` and `KRX_ALL`; confirm the stock list remains responsive.
 3. Type a numeric code such as `005930` or `5930` in the stock search and press Enter; the separate chart window should update.
 4. Open `Screening > Condition Settings`, edit a condition row, and apply it.
-5. Run `Screening > Generate/Send Screening LLM Reports` after a screening result is visible.
-6. Confirm `/log` contains user-facing, raw trace, and summary Markdown files.
-7. Confirm Telegram receives report text, not file attachments.
-8. Toggle auto report generation and confirm the setting persists in `config.yaml`.
+5. Confirm screening progress shows scan speed and automatic slowdown state when errors occur.
+6. Run `Screening > Generate/Send Screening LLM Reports` after a screening result is visible.
+7. Confirm queued LLM reports are generated one by one.
+8. Confirm `/log` retains no more than the configured number of user-facing stock report files.
+9. Toggle scheduled screening and confirm the setting persists in `config.yaml`.

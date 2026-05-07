@@ -58,6 +58,8 @@ class ScreeningProgress:
     current_name: str = ""
     elapsed_seconds: float = 0.0
     stopped: bool = False
+    samples_per_second: float = 0.0
+    adaptive_slowdown: bool = False
 
     @property
     def percent(self) -> float:

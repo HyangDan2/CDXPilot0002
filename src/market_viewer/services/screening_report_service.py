@@ -34,12 +34,15 @@ class ScreeningReportSummary:
     timestamp: str
     output_dir: Path
     summary_path: Path
+    matched: int
+    report_cap: int
     total: int
     processed: int
     saved: int
     telegram_sent: int
     failures: int
     stopped: bool
+    deleted_old_reports: int = 0
     results: list[StockReportResult] = field(default_factory=list)
 
 
@@ -63,7 +66,8 @@ def generate_screening_llm_reports(
     output_dir = _resolve_output_dir(root, report_config.report_output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    total = min(len(matched_listing), max(1, report_config.max_llm_report_stocks))
+    report_cap = max(1, report_config.max_llm_report_stocks)
+    total = min(len(matched_listing), report_cap)
     results: list[StockReportResult] = []
     started_at = time.monotonic()
     stopped = False
@@ -94,12 +98,15 @@ def generate_screening_llm_reports(
         timestamp=timestamp,
         output_dir=output_dir,
         summary_path=summary_path,
+        matched=len(matched_listing),
+        report_cap=report_cap,
         total=total,
         processed=len(results),
         saved=sum(1 for result in results if result.report_path is not None),
         telegram_sent=sum(1 for result in results if result.telegram_chunks > 0),
         failures=sum(1 for result in results if result.error),
         stopped=stopped,
+        deleted_old_reports=cleanup_old_stock_reports(output_dir, report_config.max_llm_stock_reports),
         results=results,
     )
     summary_text = _build_summary_markdown(summary)
@@ -110,6 +117,30 @@ def generate_screening_llm_reports(
         except Exception:
             pass
     return summary
+
+
+def cleanup_old_stock_reports(output_dir: Path, max_reports: int) -> int:
+    max_reports = max(1, int(max_reports))
+    report_files = sorted(
+        (
+            path
+            for path in output_dir.glob("*.md")
+            if not path.name.endswith("_raw.md") and not path.name.endswith("_summary.md")
+        ),
+        key=lambda path: path.stat().st_mtime,
+    )
+    excess = max(0, len(report_files) - max_reports)
+    deleted = 0
+    for report_path in report_files[:excess]:
+        raw_path = report_path.with_name(report_path.stem + "_raw.md")
+        for path in (report_path, raw_path):
+            try:
+                if path.exists():
+                    path.unlink()
+                    deleted += 1
+            except OSError:
+                continue
+    return deleted
 
 
 def _generate_single_report(
@@ -345,12 +376,15 @@ def _build_summary_markdown(summary: ScreeningReportSummary) -> str:
         "",
         f"- Timestamp: {summary.timestamp}",
         f"- Output directory: {summary.output_dir}",
+        f"- Matched stocks: {summary.matched}",
+        f"- Report cap: {summary.report_cap}",
         f"- Total target stocks: {summary.total}",
         f"- Processed: {summary.processed}",
         f"- Saved reports: {summary.saved}",
         f"- Telegram sent: {summary.telegram_sent}",
         f"- Failures: {summary.failures}",
         f"- Stopped: {summary.stopped}",
+        f"- Deleted old report files: {summary.deleted_old_reports}",
         "",
         "## Files",
     ]

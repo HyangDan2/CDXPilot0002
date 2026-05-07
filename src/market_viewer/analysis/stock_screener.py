@@ -12,6 +12,7 @@ from market_viewer.analysis.condition_evaluator import (
 from market_viewer.analysis.filter_models import FilterCondition, ParsedFilter
 from market_viewer.analysis.indicators import add_indicators
 from market_viewer.data.market_service import MarketService
+from market_viewer.services.rate_limiter import AdaptiveRateLimiter
 
 FUNDAMENTAL_FIELDS = {
     "PER",
@@ -34,6 +35,7 @@ def screen_listing(
     months: int = 12,
     progress_callback=None,
     cancel_checker=None,
+    rate_limiter: AdaptiveRateLimiter | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     working = listing.copy()
     warnings = list(parsed_filter.warnings)
@@ -56,9 +58,11 @@ def screen_listing(
     )
 
     for done, (_, row) in enumerate(working.iterrows(), start=1):
+        if rate_limiter is not None:
+            rate_limiter.wait()
         if cancel_checker is not None and cancel_checker():
             stopped = True
-            _emit_progress(progress_callback, done - 1, total, len(matched_rows), failures, row, started_at, stopped=True)
+            _emit_progress(progress_callback, done - 1, total, len(matched_rows), failures, row, started_at, rate_limiter=rate_limiter, stopped=True)
             break
         stock = market_service.build_stock_reference(row)
         try:
@@ -87,11 +91,15 @@ def screen_listing(
                     if field in FUNDAMENTAL_FIELDS:
                         enriched_row[field] = value
                 matched_rows.append(enriched_row)
+            if rate_limiter is not None:
+                rate_limiter.record_success()
         except Exception as exc:
+            if rate_limiter is not None:
+                rate_limiter.record_error(exc)
             failures += 1
             if failures <= 3:
                 warnings.append(f"{stock.display_name} 스크리닝 실패: {exc}")
-        _emit_progress(progress_callback, done, total, len(matched_rows), failures, row, started_at)
+        _emit_progress(progress_callback, done, total, len(matched_rows), failures, row, started_at, rate_limiter=rate_limiter)
 
     if failures > 3:
         warnings.append(f"추가 실패 종목 {failures - 3}건은 로그를 생략했습니다.")
@@ -106,7 +114,17 @@ def screen_listing(
     return result, warnings
 
 
-def _emit_progress(progress_callback, done: int, total: int, matched: int, failures: int, row: pd.Series, started_at: float, stopped: bool = False) -> None:
+def _emit_progress(
+    progress_callback,
+    done: int,
+    total: int,
+    matched: int,
+    failures: int,
+    row: pd.Series,
+    started_at: float,
+    rate_limiter: AdaptiveRateLimiter | None = None,
+    stopped: bool = False,
+) -> None:
     if progress_callback is None:
         return
     from market_viewer.analysis.filter_models import ScreeningProgress
@@ -121,6 +139,8 @@ def _emit_progress(progress_callback, done: int, total: int, matched: int, failu
             current_name=str(row.get("Name", "")),
             elapsed_seconds=time.monotonic() - started_at,
             stopped=stopped,
+            samples_per_second=rate_limiter.current_samples_per_second if rate_limiter is not None else 0.0,
+            adaptive_slowdown=rate_limiter.adaptive_slowdown if rate_limiter is not None else False,
         )
     )
 

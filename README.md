@@ -12,8 +12,12 @@ Charts are displayed in a separate top-level window. The main UI stays focused o
 - Menu-bar screening condition editor and local screening execution
 - VSPilot0023-style condition table with price, volume, moving-average, and fundamental snapshot rules
 - Screening progress with processed/total count, match count, failure count, percent, elapsed time, ETA, and Stop support
-- Optional sequential LLM report generation for completed screening results
+- Screening rate limiting starts at 10 samples/second and can automatically slow down after timeout or server errors
+- Optional queued LLM report generation for completed screening results
+- LLM stock reports are generated and sent one stock at a time, with a configurable 5-minute interval
+- Optional in-app scheduler for hourly screening runs
 - Per-stock Markdown report plus raw trace Markdown saved under `/log`
+- LLM stock report retention keeps the latest 100 user-facing reports and removes older report/raw pairs
 - Telegram text delivery for generated LLM reports; reports are sent as message text, not as file attachments
 - Kiwoom `ka10001` basic-information snapshot for PER, PBR, ROE, EPS, BPS, revenue, operating profit, and net income
 - Daily OHLCV chart data through Kiwoom `ka10081`
@@ -73,9 +77,17 @@ screening:
   auto_llm_reports: false
   telegram_after_llm_reports: true
   report_output_dir: "log"
-  max_llm_report_stocks: 30
+  max_llm_report_stocks: 100
+  max_llm_stock_reports: 100
   send_summary_to_telegram: true
   telegram_send_as_text: true
+  max_samples_per_second: 10.0
+  adaptive_speed_down: true
+  min_samples_per_second: 1.0
+  llm_report_queue_enabled: true
+  llm_report_interval_minutes: 5
+  scheduled_screening_enabled: false
+  scheduled_screening_interval_minutes: 60
 ```
 
 ## Kiwoom REST
@@ -94,24 +106,34 @@ screening:
 - Metric rule cells accept forms such as `<5`, `>10`, `>=0`, `<=100000`, and `>2,<10`.
 - Run `Screening > Apply Conditions` to apply the active conditions to the current listing.
 - Use the Stop button to stop after the current stock finishes processing.
+- Screening uses a configurable rate limiter. The default rate is 10 samples/second.
+- When adaptive slowdown is enabled, repeated timeout / 429 / 5xx / network errors reduce the scan speed down to the configured minimum.
+- The progress label shows the current scan speed and marks automatic slowdown when it is active.
 
 ## Screening LLM Reports
 
-The app can generate sequential stateless LLM reports for the latest completed screening result.
+The app can generate queued stateless LLM reports for the latest completed screening result.
 
 Recommended workflow:
 
 1. Run condition screening.
 2. Review the matched list.
 3. Run `Screening > Generate/Send Screening LLM Reports`.
-4. The app processes each matched stock one by one.
-5. For each stock, it saves two Markdown files and sends the user-facing report to Telegram as plain message text.
+4. The app enqueues up to `screening.max_llm_report_stocks` matched stocks.
+5. The first stock is processed immediately; remaining stocks are processed one at a time every `screening.llm_report_interval_minutes`.
+6. For each stock, it saves two Markdown files and sends the user-facing report to Telegram as plain message text.
 
 Generated files:
 
 - `log/{timestamp}_{code}_{safe_name}.md`: user-facing LLM analysis report
 - `log/{timestamp}_{code}_{safe_name}_raw.md`: raw trace with input data, prompt, LLM output, Telegram result, and errors
 - `log/{timestamp}_summary.md`: run-level summary
+
+Retention:
+
+- `screening.max_llm_stock_reports` controls how many user-facing stock reports are kept.
+- When the count exceeds the limit, the oldest user-facing report is deleted with its matching `_raw.md` file.
+- Summary files are not counted as stock reports.
 
 The report prompt requires these sections:
 
@@ -124,6 +146,21 @@ The report prompt requires these sections:
 - Legal-risk disclaimer and AI limitation notice
 
 `Screening > Auto-generate/send LLM reports after screening completion` is a checkable menu toggle. It writes to `screening.auto_llm_reports`. When enabled, the app validates that LLM and Telegram settings are present before saving the toggle.
+
+`Screening > Run scheduled screening every hour` is a checkable menu toggle. It writes to `screening.scheduled_screening_enabled`. The scheduler runs while the app is open and skips ticks when listing, screening, or report generation is already active.
+
+`Screening > Report/Schedule Settings...` opens the report operations dialog. Saving the dialog updates `config.yaml > screening` immediately. If scheduled screening is enabled, the scheduler timer is restarted with the new interval.
+
+Dialog fields:
+
+- LLM report interval in minutes
+- Scheduled screening interval in minutes
+- Screening maximum speed in samples/second
+- Adaptive minimum speed in samples/second
+- Adaptive slowdown enabled/disabled
+- Maximum queued report stocks
+- Maximum stored stock reports
+- LLM report queue enabled/disabled
 
 ## Telegram
 

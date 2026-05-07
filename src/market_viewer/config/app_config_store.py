@@ -89,9 +89,17 @@ def load_screening_report_config() -> ScreeningReportConfig:
         auto_llm_reports=_as_bool(screening_raw.get("auto_llm_reports"), False),
         telegram_after_llm_reports=_as_bool(screening_raw.get("telegram_after_llm_reports"), True),
         report_output_dir=str(screening_raw.get("report_output_dir", "log")),
-        max_llm_report_stocks=max(1, int(screening_raw.get("max_llm_report_stocks", 30))),
+        max_llm_report_stocks=max(1, int(screening_raw.get("max_llm_report_stocks", 100))),
+        max_llm_stock_reports=max(1, int(screening_raw.get("max_llm_stock_reports", 100))),
         send_summary_to_telegram=_as_bool(screening_raw.get("send_summary_to_telegram"), True),
         telegram_send_as_text=_as_bool(screening_raw.get("telegram_send_as_text"), True),
+        max_samples_per_second=max(0.1, float(screening_raw.get("max_samples_per_second", 10.0))),
+        adaptive_speed_down=_as_bool(screening_raw.get("adaptive_speed_down"), True),
+        min_samples_per_second=max(0.1, float(screening_raw.get("min_samples_per_second", 1.0))),
+        llm_report_queue_enabled=_as_bool(screening_raw.get("llm_report_queue_enabled"), True),
+        llm_report_interval_minutes=max(1, int(screening_raw.get("llm_report_interval_minutes", 5))),
+        scheduled_screening_enabled=_as_bool(screening_raw.get("scheduled_screening_enabled"), False),
+        scheduled_screening_interval_minutes=max(1, int(screening_raw.get("scheduled_screening_interval_minutes", 60))),
     )
 
 
@@ -186,6 +194,14 @@ def _screening_report_payload(config: ScreeningReportConfig) -> dict:
         "telegram_after_llm_reports": config.telegram_after_llm_reports,
         "report_output_dir": config.report_output_dir,
         "max_llm_report_stocks": config.max_llm_report_stocks,
+        "max_llm_stock_reports": config.max_llm_stock_reports,
         "send_summary_to_telegram": config.send_summary_to_telegram,
         "telegram_send_as_text": config.telegram_send_as_text,
+        "max_samples_per_second": config.max_samples_per_second,
+        "adaptive_speed_down": config.adaptive_speed_down,
+        "min_samples_per_second": config.min_samples_per_second,
+        "llm_report_queue_enabled": config.llm_report_queue_enabled,
+        "llm_report_interval_minutes": config.llm_report_interval_minutes,
+        "scheduled_screening_enabled": config.scheduled_screening_enabled,
+        "scheduled_screening_interval_minutes": config.scheduled_screening_interval_minutes,
     }

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pandas as pd
-from PySide6.QtCore import QThreadPool, Qt
+from PySide6.QtCore import QThreadPool, Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import QFileDialog, QMainWindow, QMessageBox, QSplitter, QStatusBar
 
@@ -27,6 +29,7 @@ from market_viewer.services.context_service import build_workspace_context_markd
 from market_viewer.services.intelligence_service import build_report_rows
 from market_viewer.services.llm_service import run_connection_test, run_stock_analysis
 from market_viewer.services.request_gate import RequestGate
+from market_viewer.services.rate_limiter import AdaptiveRateLimiter
 from market_viewer.services.screening_service import (
     build_resolved_filter_markdown,
     execute_screening,
@@ -42,6 +45,7 @@ from market_viewer.ui.chart_window import ChartWindow
 from market_viewer.ui.kiwoom_settings_dialog import KiwoomSettingsDialog
 from market_viewer.ui.llm_settings_dialog import LLMSettingsDialog
 from market_viewer.ui.screening_dialog import ScreeningDialog
+from market_viewer.ui.screening_report_settings_dialog import ScreeningReportSettingsDialog
 from market_viewer.ui.stock_list_panel import StockListPanel
 from market_viewer.ui.telegram_settings_dialog import TelegramSettingsDialog
 from market_viewer.ui.worker import Worker, WorkerTask
@@ -81,8 +85,15 @@ class MainWindow(QMainWindow):
         self._request_gate = RequestGate()
         self._is_closing = False
         self._screen_cancel_requested = False
+        self._screen_running = False
         self._report_cancel_requested = False
         self._report_running = False
+        self._report_queue: list[pd.Series] = []
+        self._report_queue_filter = ParsedFilter(original_prompt="", normalized_prompt="")
+        self._report_queue_total = 0
+        self._report_queue_saved = 0
+        self._report_queue_sent = 0
+        self._report_queue_failed = 0
         self._active_workers: set[Worker] = set()
         self._listing_loading = False
 
@@ -91,6 +102,7 @@ class MainWindow(QMainWindow):
         self._setup_ui()
         self._create_actions()
         self._create_menus()
+        self._setup_timers()
         self._sync_prompt_layer_actions()
         self._set_current_screening_conditions(self.screening_conditions, apply_to_panel=True)
         self._refresh_workspace_context()
@@ -204,10 +216,26 @@ class MainWindow(QMainWindow):
             "스크리닝 결과 LLM 보고서 생성/발송",
             self._generate_screening_reports,
         )
+        self.stop_report_queue_action = self._make_action(
+            "LLM 보고서 큐 중지",
+            self._stop_report_queue,
+        )
+        self.clear_report_queue_action = self._make_action(
+            "LLM 보고서 큐 비우기",
+            self._clear_report_queue,
+        )
+        self.screen_report_settings_action = self._make_action(
+            "보고서/스케줄 설정...",
+            self._open_screen_report_settings,
+        )
         self.auto_screen_reports_action = QAction("스크리닝 완료 후 LLM 보고서 자동 생성/발송", self)
         self.auto_screen_reports_action.setCheckable(True)
         self.auto_screen_reports_action.setChecked(self.screening_report_config.auto_llm_reports)
         self.auto_screen_reports_action.toggled.connect(self._toggle_auto_screening_reports)
+        self.scheduled_screening_action = QAction("1시간마다 자동 스크리닝 실행", self)
+        self.scheduled_screening_action.setCheckable(True)
+        self.scheduled_screening_action.setChecked(self.screening_report_config.scheduled_screening_enabled)
+        self.scheduled_screening_action.toggled.connect(self._toggle_scheduled_screening)
 
         self.next_stock_action = self._make_action(
             "다음 종목",
@@ -321,7 +349,11 @@ class MainWindow(QMainWindow):
         screening_menu.addAction(self.clear_screen_action)
         screening_menu.addSeparator()
         screening_menu.addAction(self.generate_screen_reports_action)
+        screening_menu.addAction(self.stop_report_queue_action)
+        screening_menu.addAction(self.clear_report_queue_action)
         screening_menu.addAction(self.auto_screen_reports_action)
+        screening_menu.addAction(self.scheduled_screening_action)
+        screening_menu.addAction(self.screen_report_settings_action)
 
         chart_menu = menu_bar.addMenu("Chart")
         chart_menu.addAction(self.focus_chart_action)
@@ -371,6 +403,16 @@ class MainWindow(QMainWindow):
         about_action = QAction("현재 상태", self)
         about_action.triggered.connect(self._show_current_status)
         help_menu.addAction(about_action)
+
+    def _setup_timers(self) -> None:
+        self.report_queue_timer = QTimer(self)
+        self.report_queue_timer.setSingleShot(True)
+        self.report_queue_timer.timeout.connect(self._process_next_queued_report)
+
+        self.scheduled_screening_timer = QTimer(self)
+        self.scheduled_screening_timer.timeout.connect(self._run_scheduled_screening)
+        if self.screening_report_config.scheduled_screening_enabled:
+            self._restart_scheduled_screening_timer()
 
     def _make_action(self, text: str, slot, shortcut=None, register_shortcut: bool = False) -> QAction:
         action = QAction(text, self)
@@ -642,6 +684,7 @@ class MainWindow(QMainWindow):
         market_scope = self.stock_panel.current_market_scope()
         parsed = self.current_filter
         self._screen_cancel_requested = False
+        self._screen_running = True
         self.stock_panel.set_screening_running(True)
         self.stock_panel.set_screening_progress("0 / 0 처리 중 · 매칭 0 · 실패 0 · 0.0%")
         self._run_scoped_worker(
@@ -658,6 +701,11 @@ class MainWindow(QMainWindow):
                     listing=self.current_listing,
                     progress_callback=progress_emit,
                     cancel_checker=lambda: self._screen_cancel_requested,
+                    rate_limiter=AdaptiveRateLimiter(
+                        max_samples_per_second=self.screening_report_config.max_samples_per_second,
+                        min_samples_per_second=self.screening_report_config.min_samples_per_second,
+                        adaptive=self.screening_report_config.adaptive_speed_down,
+                    ),
                 ),
             ),
             on_success=self._on_screen_loaded,
@@ -666,10 +714,13 @@ class MainWindow(QMainWindow):
         )
 
     def _stop_screening(self) -> None:
-        if self._report_running:
+        if self._report_running or self._report_queue:
             self._report_cancel_requested = True
+            self.report_queue_timer.stop()
             self.stock_panel.set_screening_progress("보고서 중지 요청됨 · 현재 종목 처리 후 멈춥니다.")
             self.statusBar().showMessage("LLM 보고서 생성을 중지 요청했습니다.", 4000)
+            if not self._report_running:
+                self._finish_report_queue("중지됨")
             return
         self._screen_cancel_requested = True
         self.stock_panel.set_screening_progress("중지 요청됨 · 현재 종목 처리 후 멈춥니다.")
@@ -682,6 +733,10 @@ class MainWindow(QMainWindow):
             f"{progress.done} / {progress.total} 처리 · 매칭 {progress.matched} · 실패 {progress.failures} · "
             f"{progress.percent:.1f}% · 경과 {self._format_duration(progress.elapsed_seconds)} · 남은 {remaining_text}"
         )
+        if progress.samples_per_second:
+            text += f" · 속도 {progress.samples_per_second:.1f}/sec"
+        if progress.adaptive_slowdown:
+            text += " · 자동 감속"
         if progress.current_code:
             text += f" · {progress.current_name}({progress.current_code})"
         if progress.stopped:
@@ -693,6 +748,7 @@ class MainWindow(QMainWindow):
         parsed, payload = task.payload
         frame, warnings = payload
         self.stock_panel.set_screening_running(False)
+        self._screen_running = False
         self._screen_cancel_requested = False
         self._clear_active_stock_context()
         self.current_listing = frame
@@ -718,6 +774,7 @@ class MainWindow(QMainWindow):
 
     def _on_screen_failed(self, message: str) -> None:
         self.stock_panel.set_screening_running(False)
+        self._screen_running = False
         self._screen_cancel_requested = False
         self.stock_panel.set_screening_progress(f"실패 · {message}")
         self._handle_background_error(message)
@@ -735,6 +792,42 @@ class MainWindow(QMainWindow):
         message = "자동 LLM 보고서 생성/발송을 켰습니다." if enabled else "자동 LLM 보고서 생성/발송을 껐습니다."
         self.statusBar().showMessage(message, 4000)
 
+    def _toggle_scheduled_screening(self, enabled: bool) -> None:
+        self.screening_report_config.scheduled_screening_enabled = enabled
+        save_screening_report_config(self.screening_report_config)
+        if enabled:
+            self._restart_scheduled_screening_timer()
+            self.statusBar().showMessage("자동 스크리닝 스케줄러를 켰습니다.", 4000)
+        else:
+            self.scheduled_screening_timer.stop()
+            self.statusBar().showMessage("자동 스크리닝 스케줄러를 껐습니다.", 4000)
+
+    def _restart_scheduled_screening_timer(self) -> None:
+        interval_ms = self.screening_report_config.scheduled_screening_interval_minutes * 60 * 1000
+        self.scheduled_screening_timer.start(interval_ms)
+
+    def _run_scheduled_screening(self) -> None:
+        if self._listing_loading or self._screen_running or self._report_running or self._report_queue:
+            self.statusBar().showMessage("자동 스크리닝 tick skipped: 작업이 진행 중입니다.", 5000)
+            return
+        self.statusBar().showMessage("자동 스크리닝을 실행합니다.", 5000)
+        self._apply_resolved_screen()
+
+    def _open_screen_report_settings(self) -> None:
+        dialog = ScreeningReportSettingsDialog(self.screening_report_config, self)
+        if not dialog.exec():
+            return
+        self.screening_report_config = dialog.get_config()
+        save_screening_report_config(self.screening_report_config)
+        self.scheduled_screening_action.blockSignals(True)
+        self.scheduled_screening_action.setChecked(self.screening_report_config.scheduled_screening_enabled)
+        self.scheduled_screening_action.blockSignals(False)
+        if self.screening_report_config.scheduled_screening_enabled:
+            self._restart_scheduled_screening_timer()
+        else:
+            self.scheduled_screening_timer.stop()
+        self.statusBar().showMessage("보고서/스케줄 설정을 저장했습니다.", 4000)
+
     def _screen_report_ready(self, *, show_error: bool = False) -> bool:
         if not self.session_state.llm_config.connection_ready:
             if show_error:
@@ -750,15 +843,49 @@ class MainWindow(QMainWindow):
         if self._report_running:
             self.statusBar().showMessage("이미 LLM 보고서를 생성/전송하는 중입니다.", 4000)
             return
+        if self._report_queue:
+            self.statusBar().showMessage("이미 LLM 보고서 큐가 대기 중입니다.", 4000)
+            return
         if self.last_screening_listing.empty:
             self._show_error("LLM 보고서를 생성할 스크리닝 결과가 없습니다. 조건 스크리닝을 먼저 실행하세요.")
             return
         if not self._screen_report_ready(show_error=True):
             return
+        limit = min(len(self.last_screening_listing), self.screening_report_config.max_llm_report_stocks)
+        self._report_queue = [row.copy() for _, row in self.last_screening_listing.head(limit).iterrows()]
+        self._report_queue_filter = self.last_screening_filter
+        self._report_queue_total = len(self._report_queue)
+        self._report_queue_saved = 0
+        self._report_queue_sent = 0
+        self._report_queue_failed = 0
+        self._report_cancel_requested = False
+        self.stock_panel.set_screening_running(True)
+        interval = self.screening_report_config.llm_report_interval_minutes
+        self.stock_panel.set_screening_progress(
+            f"LLM 보고서 큐 대기 {self._report_queue_total}개 · {interval}분 간격 전송 준비"
+        )
+        self._process_next_queued_report()
+
+    def _process_next_queued_report(self) -> None:
+        if self._is_closing or self._report_running:
+            return
+        if self._report_cancel_requested:
+            self._finish_report_queue("중지됨")
+            return
+        if not self._report_queue:
+            self._finish_report_queue("완료")
+            return
+        row = self._report_queue.pop(0)
+        stock_name = str(row.get("Name", ""))
+        stock_code = str(row.get("Code", ""))
         self._report_cancel_requested = False
         self._report_running = True
         self.stock_panel.set_screening_running(True)
-        self.stock_panel.set_screening_progress("LLM 보고서 생성/전송 0 / 0 · 저장 0 · 전송 0 · 실패 0")
+        done = self._report_queue_total - len(self._report_queue) - 1
+        self.stock_panel.set_screening_progress(
+            f"LLM 보고서 생성/전송 {done} / {self._report_queue_total} · "
+            f"대기 {len(self._report_queue)} · {stock_name}({stock_code})"
+        )
         self._run_scoped_worker(
             channel=self.CHANNEL_SCREEN_REPORT,
             task_name="screen_report",
@@ -768,9 +895,9 @@ class MainWindow(QMainWindow):
                 market_service=self.market_service,
                 llm_config=self.session_state.llm_config,
                 telegram_config=self.telegram_config,
-                report_config=self.screening_report_config,
-                matched_listing=self.last_screening_listing,
-                parsed_filter=self.last_screening_filter,
+                report_config=replace(self.screening_report_config, send_summary_to_telegram=False),
+                matched_listing=pd.DataFrame([row]),
+                parsed_filter=self._report_queue_filter,
                 progress_callback=progress_emit,
                 cancel_checker=lambda: self._report_cancel_requested,
             ),
@@ -778,6 +905,30 @@ class MainWindow(QMainWindow):
             on_progress=self._on_screening_report_progress,
             on_failure=self._on_screening_reports_failed,
         )
+
+    def _finish_report_queue(self, state: str) -> None:
+        self.report_queue_timer.stop()
+        self._report_queue.clear()
+        self.stock_panel.set_screening_running(False)
+        self._report_running = False
+        self._report_cancel_requested = False
+        text = (
+            f"LLM 보고서 큐 {state} · 저장 {self._report_queue_saved} · "
+            f"전송 {self._report_queue_sent} · 실패 {self._report_queue_failed}"
+        )
+        self.stock_panel.set_screening_progress(text)
+        self.statusBar().showMessage(text, 6000)
+
+    def _stop_report_queue(self) -> None:
+        self._report_cancel_requested = True
+        self.report_queue_timer.stop()
+        self.statusBar().showMessage("LLM 보고서 큐 중지를 요청했습니다.", 4000)
+
+    def _clear_report_queue(self) -> None:
+        self._report_queue.clear()
+        self.report_queue_timer.stop()
+        if not self._report_running:
+            self._finish_report_queue("비움")
 
     def _on_screening_report_progress(self, payload: object) -> None:
         if not isinstance(payload, dict):
@@ -799,24 +950,42 @@ class MainWindow(QMainWindow):
 
     def _on_screening_reports_done(self, task: WorkerTask) -> None:
         summary: ScreeningReportSummary = task.payload
-        self.stock_panel.set_screening_running(False)
-        self._report_cancel_requested = False
         self._report_running = False
+        self._report_queue_saved += summary.saved
+        self._report_queue_sent += summary.telegram_sent
+        self._report_queue_failed += summary.failures
+        processed = self._report_queue_total - len(self._report_queue)
         text = (
-            f"LLM 보고서 {summary.saved}개 저장, Telegram {summary.telegram_sent}개 전송, "
-            f"실패 {summary.failures}개"
+            f"LLM 보고서 {processed} / {self._report_queue_total} · "
+            f"대기 {len(self._report_queue)} · 저장 {self._report_queue_saved} · "
+            f"전송 {self._report_queue_sent} · 실패 {self._report_queue_failed}"
         )
-        if summary.stopped:
-            text = "중지됨 · " + text
+        if summary.deleted_old_reports:
+            text += f" · 오래된 파일 {summary.deleted_old_reports}개 정리"
         self.stock_panel.set_screening_progress(text)
         self.statusBar().showMessage(f"{text} · {summary.summary_path}", 7000)
+        if self._report_cancel_requested or not self._report_queue:
+            self._finish_report_queue("완료" if not self._report_cancel_requested else "중지됨")
+            return
+        if self.screening_report_config.llm_report_queue_enabled:
+            interval_ms = self.screening_report_config.llm_report_interval_minutes * 60 * 1000
+            self.report_queue_timer.start(interval_ms)
+        else:
+            self._process_next_queued_report()
 
     def _on_screening_reports_failed(self, message: str) -> None:
-        self.stock_panel.set_screening_running(False)
-        self._report_cancel_requested = False
         self._report_running = False
+        self._report_queue_failed += 1
         self.stock_panel.set_screening_progress(f"LLM 보고서 실패 · {message}")
         self._handle_background_error(message)
+        if self._report_queue and not self._report_cancel_requested:
+            if self.screening_report_config.llm_report_queue_enabled:
+                interval_ms = self.screening_report_config.llm_report_interval_minutes * 60 * 1000
+                self.report_queue_timer.start(interval_ms)
+            else:
+                self._process_next_queued_report()
+        else:
+            self._finish_report_queue("실패")
 
     @staticmethod
     def _format_duration(seconds: float) -> str:

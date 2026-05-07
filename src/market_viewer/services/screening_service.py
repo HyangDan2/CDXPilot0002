@@ -6,6 +6,7 @@ from market_viewer.analysis.filter_models import ParsedFilter
 from market_viewer.analysis.filter_parser import parse_filter_prompt
 from market_viewer.analysis.stock_screener import screen_listing
 from market_viewer.data.market_service import MarketService
+from market_viewer.services.rate_limiter import AdaptiveRateLimiter
 
 
 def parse_local_screening_prompt(prompt: str, market_scope: str) -> ParsedFilter:
@@ -20,6 +21,7 @@ def execute_screening(
     listing: pd.DataFrame | None = None,
     progress_callback=None,
     cancel_checker=None,
+    rate_limiter: AdaptiveRateLimiter | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     source_listing = listing.copy() if listing is not None and not listing.empty else market_service.load_listing(market_scope)
     return screen_listing(
@@ -28,6 +30,7 @@ def execute_screening(
         parsed_filter,
         progress_callback=progress_callback,
         cancel_checker=cancel_checker,
+        rate_limiter=rate_limiter,
     )
 
 

@@ -54,9 +54,17 @@ class ScreeningReportConfig:
     auto_llm_reports: bool = False
     telegram_after_llm_reports: bool = True
     report_output_dir: str = "log"
-    max_llm_report_stocks: int = 30
+    max_llm_report_stocks: int = 100
+    max_llm_stock_reports: int = 100
     send_summary_to_telegram: bool = True
     telegram_send_as_text: bool = True
+    max_samples_per_second: float = 10.0
+    adaptive_speed_down: bool = True
+    min_samples_per_second: float = 1.0
+    llm_report_queue_enabled: bool = True
+    llm_report_interval_minutes: int = 5
+    scheduled_screening_enabled: bool = False
+    scheduled_screening_interval_minutes: int = 60
 
 
 @dataclass(slots=True)

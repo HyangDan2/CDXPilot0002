@@ -22,9 +22,17 @@ screening:
   auto_llm_reports: false
   telegram_after_llm_reports: true
   report_output_dir: "log"
-  max_llm_report_stocks: 30
+  max_llm_report_stocks: 100
+  max_llm_stock_reports: 100
   send_summary_to_telegram: true
   telegram_send_as_text: true
+  max_samples_per_second: 10.0
+  adaptive_speed_down: true
+  min_samples_per_second: 1.0
+  llm_report_queue_enabled: true
+  llm_report_interval_minutes: 5
+  scheduled_screening_enabled: false
+  scheduled_screening_interval_minutes: 60
   custom_conditions:
     - name: "bullish_value"
       enabled: true
