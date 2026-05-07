@@ -44,3 +44,5 @@ ENV/
 
 # Notebook checkpoints
 .ipynb_checkpoints/
+
+log/s
